@@ -52,12 +52,15 @@ while True:
     elif key == ord('s'):
         if len(rostos) > 0:
             print("Gerando banco_rostos.h...")
-            with open("banco_rostos.h", "w") as f:
+            # O 'r' antes das aspas indica "raw string", evitando que o Windows 
+            # confunda as barras invertidas (\) com caracteres especiais
+            caminho_esp = r"C:\Users\amand\OneDrive\Documentos\GitHub\reconhecimento-facial\esp-main\banco_rostos.h"
+            
+            with open(caminho_esp, "w") as f:
                 f.write("#ifndef BANCO_ROSTOS_H\n#define BANCO_ROSTOS_H\n\n")
                 f.write("#include <Arduino.h>\n\n")
                 f.write(f"const int NUM_ROSTOS = {len(rostos)};\n\n")
                 
-                # O 'const' garante que isso vá para a Flash, salvando a RAM!
                 f.write("const uint8_t banco_rostos[][64][64] = {\n")
                 
                 for idx, img in enumerate(rostos):
@@ -69,7 +72,7 @@ while True:
                     f.write("    },\n" if idx < len(rostos) - 1 else "    }\n")
                 
                 f.write("};\n\n#endif\n")
-            print("Sucesso! Arquivo 'banco_rostos.h' criado.")
+            print(f"Sucesso! Arquivo salvo direto na pasta: {caminho_esp}")
             break
         else:
             print("Erro: Capture pelo menos 1 rosto antes de salvar.")
