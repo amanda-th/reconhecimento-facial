@@ -101,17 +101,17 @@ void processImageTask(void *pvParameters) {
         // 1. Extração de Características
         aplicarSobel();
 
-        // 2. Classificação contra o Banco de Dados
-        long sad_Neutro    = calcularSAD(rosto_Neutro);
-        long sad_SemOculos = calcularSAD(rosto_SemOculos);
-        long sad_Perto     = calcularSAD(rosto_Perto);
-
         // O nosso erro final será o MENOR valor entre as três tentativas
-        long melhorSAD = sad_Neutro;
-        if (sad_SemOculos < melhorSAD) melhorSAD = sad_SemOculos;
-        if (sad_Perto < melhorSAD) melhorSAD = sad_Perto;
+        long melhorSAD = 2000000;
+
+        // Um laço for que testa automaticamente TODOS os rostos do arquivo .h
+        for (int i = 0; i < NUM_ROSTOS; i++) {
+            long sad_atual = calcularSAD(banco_rostos[i]);
+            if (sad_atual < melhorSAD) {
+                melhorSAD = sad_atual;
+            }
+        }
         
-        // Calibre com base nos novos valores que aparecerem no terminal
         long threshold = 130000; 
         bool ehOAluno = (melhorSAD < threshold);
 
