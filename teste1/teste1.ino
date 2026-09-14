@@ -117,46 +117,36 @@ void aplicarSobel() {
 
 // =========================================================================
 // ALGORITMO DE CLASSIFICAÇÃO MELHORADO (SAD com Janela Deslizante)
+// O parâmetro agora indica QUAL rosto do banco de dados estamos comparando
 // =========================================================================
-long calcularSAD() {
-    long menorDiferenca = 2000000; // Começa com um valor absurdamente alto
-
-    // Permite que o seu rosto se mova em uma margem de -3 a +3 pixels 
-    // na horizontal e na vertical.
-    int margem = 3; 
+long calcularSAD(const uint8_t rostoSalvo[HEIGHT][WIDTH]) {
+    long menorDiferenca = 2000000;
+    int margem = 3; // Mantemos a janela deslizante de -3 a +3 pixels
 
     for (int offsetY = -margem; offsetY <= margem; offsetY++) {
         for (int offsetX = -margem; offsetX <= margem; offsetX++) {
             
             long diferencaAtual = 0;
-            
             for (int y = 1; y < HEIGHT - 1; y++) {
                 for (int x = 1; x < WIDTH - 1; x++) {
-                    
-                    // Calcula a nova coordenada deslocada
                     int mapY = y + offsetY;
                     int mapX = x + offsetX;
                     
-                    // Garante que não vamos ler memória fora da matriz rostoIdeal
                     if (mapY >= 1 && mapY < HEIGHT - 1 && mapX >= 1 && mapX < WIDTH - 1) {
-                        diferencaAtual += abs(outputImage[y][x] - rostoIdeal[mapY][mapX]);
+                        diferencaAtual += abs(outputImage[y][x] - rostoSalvo[mapY][mapX]);
                     } else {
-                        // Se saiu da borda, apenas soma o pixel atual como "penalidade" leve
                         diferencaAtual += outputImage[y][x]; 
                     }
                 }
             }
             
-            // Se esse encaixe ficou melhor que os anteriores, salva ele
             if (diferencaAtual < menorDiferenca) {
                 menorDiferenca = diferencaAtual;
             }
         }
     }
-    
     return menorDiferenca;
 }
-
 // =========================================================================
 void receiveSerialTask(void *pvParameters) {
     for (;;) {
@@ -177,26 +167,32 @@ void processImageTask(void *pvParameters) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // 1. Extração de Características (Sobel)
+        // 1. Extração de Características
         aplicarSobel();
 
-        // 2. Classificação
-        long diferenca = calcularSAD();
-        
-        // Calibre este valor olhando o terminal do Python!
-        long threshold = 150000; 
-        bool ehOAluno = (diferenca < threshold);
+        // 2. Classificação contra o Banco de Dados
+        long sad_Neutro    = calcularSAD(rosto_Neutro);
+        long sad_SemOculos = calcularSAD(rosto_SemOculos);
+        long sad_Perto     = calcularSAD(rosto_Perto);
 
-        // 3. Comunicação ESP-NOW (Deixamos pronto para quando a placa chegar)
+        // O nosso erro final será o MENOR valor entre as três tentativas
+        long melhorSAD = sad_Neutro;
+        if (sad_SemOculos < melhorSAD) melhorSAD = sad_SemOculos;
+        if (sad_Perto < melhorSAD) melhorSAD = sad_Perto;
+        
+        // Calibre com base nos novos valores que aparecerem no terminal
+        long threshold = 130000; 
+        bool ehOAluno = (melhorSAD < threshold);
+
+        // 3. ESP-NOW
         dadosEnvio.reconhecido = ehOAluno;
         esp_now_send(macESP2, (uint8_t *) &dadosEnvio, sizeof(dadosEnvio));
 
-        // 4. Feedback via Serial para o script Python
-        // O Python vai receber isso e imprimir no terminal do seu PC
+        // 4. Feedback
         if (ehOAluno) {
-            Serial.printf("ACESSO LIBERADO Amanda! (SAD: %ld)\n", diferenca);
+            Serial.printf("ACESSO LIBERADO Amanda! (Melhor SAD: %ld)\n", melhorSAD);
         } else {
-            Serial.printf("ACESSO NEGADO - Rosto estranho (SAD: %ld)\n", diferenca);
+            Serial.printf("ACESSO NEGADO (Melhor SAD: %ld)\n", melhorSAD);
         }
     }
 }
