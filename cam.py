@@ -1,13 +1,13 @@
-# Sistema de aquisição Câmera + Memória
-
-# NECESSÁRIO: pip install opencv-python pyserial
 import cv2
 import serial
 import time
 import sys
 
+# NECESSÁRIO: pip install opencv-python pyserial
+# Sistema de aquisição Câmera + Memória: apenas para captura a imagem da webcam e redimensiona
+
 # Configurações do Sistema
-SERIAL_PORT = '/dev/ttyUSB0'  # Altere para /dev/ttyACM0 ou COM3 se necessário
+SERIAL_PORT = 'COM7'  # Altere para /dev/ttyACM0 ou COM3 se necessário
 BAUD_RATE = 115200          # Taxa de transmissão de dados (deve ser igual na ESP32)
 WIDTH = 64
 HEIGHT = 64
