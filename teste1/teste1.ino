@@ -116,16 +116,45 @@ void aplicarSobel() {
 }
 
 // =========================================================================
-// ALGORITMO DE CLASSIFICAÇÃO (SAD)
+// ALGORITMO DE CLASSIFICAÇÃO MELHORADO (SAD com Janela Deslizante)
 // =========================================================================
 long calcularSAD() {
-    long diferencaTotal = 0;
-    for (int y = 1; y < HEIGHT - 1; y++) {
-        for (int x = 1; x < WIDTH - 1; x++) {
-            diferencaTotal += abs(outputImage[y][x] - rostoIdeal[y][x]);
+    long menorDiferenca = 2000000; // Começa com um valor absurdamente alto
+
+    // Permite que o seu rosto se mova em uma margem de -3 a +3 pixels 
+    // na horizontal e na vertical.
+    int margem = 3; 
+
+    for (int offsetY = -margem; offsetY <= margem; offsetY++) {
+        for (int offsetX = -margem; offsetX <= margem; offsetX++) {
+            
+            long diferencaAtual = 0;
+            
+            for (int y = 1; y < HEIGHT - 1; y++) {
+                for (int x = 1; x < WIDTH - 1; x++) {
+                    
+                    // Calcula a nova coordenada deslocada
+                    int mapY = y + offsetY;
+                    int mapX = x + offsetX;
+                    
+                    // Garante que não vamos ler memória fora da matriz rostoIdeal
+                    if (mapY >= 1 && mapY < HEIGHT - 1 && mapX >= 1 && mapX < WIDTH - 1) {
+                        diferencaAtual += abs(outputImage[y][x] - rostoIdeal[mapY][mapX]);
+                    } else {
+                        // Se saiu da borda, apenas soma o pixel atual como "penalidade" leve
+                        diferencaAtual += outputImage[y][x]; 
+                    }
+                }
+            }
+            
+            // Se esse encaixe ficou melhor que os anteriores, salva ele
+            if (diferencaAtual < menorDiferenca) {
+                menorDiferenca = diferencaAtual;
+            }
         }
     }
-    return diferencaTotal;
+    
+    return menorDiferenca;
 }
 
 // =========================================================================
