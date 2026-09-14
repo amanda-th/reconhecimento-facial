@@ -25,54 +25,54 @@ def aplicar_sobel_manual(imagem):
     return output
 
 cap = cv2.VideoCapture(0)
-rostos = {}
+rostos = [] # Agora é uma lista, pode crescer o quanto você quiser!
 
 print("Comandos:")
-print("[1] Capturar Rosto Neutro")
-print("[2] Capturar Sem Óculos")
-print("[3] Capturar Rosto de Perto")
-print("[s] Salvar banco de dados e sair")
+print("[Espaço] Capturar um novo rosto para o banco")
+print("[s] Salvar banco_rostos.h e sair")
 
 while True:
     ret, frame = cap.read()
     if not ret: break
         
-    cv2.putText(frame, "1:Neutro | 2:Sem Oculos | 3:Perto | S:Salvar", (10, 30), 
+    cv2.putText(frame, f"Rostos salvos: {len(rostos)} | Espaco: Capturar | S: Salvar", (10, 30), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
     cv2.imshow("Gerador de Banco de Dados", frame)
     key = cv2.waitKey(1) & 0xFF
     
-    if key in [ord('1'), ord('2'), ord('3')]:
+    if key == ord(' '): # Tecla Espaço
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         resized = cv2.resize(gray, (WIDTH, HEIGHT))
         sobel_img = aplicar_sobel_manual(resized)
         
-        if key == ord('1'):
-            rostos['rosto_Neutro'] = sobel_img
-            print("-> Rosto Neutro capturado!")
-        elif key == ord('2'):
-            rostos['rosto_SemOculos'] = sobel_img
-            print("-> Rosto Sem Óculos capturado!")
-        elif key == ord('3'):
-            rostos['rosto_Perto'] = sobel_img
-            print("-> Rosto Perto capturado!")
+        rostos.append(sobel_img)
+        print(f"-> Rosto {len(rostos)} capturado!")
             
     elif key == ord('s'):
-        if len(rostos) == 3:
-            print("Gerando banco de dados em C++...")
-            with open("banco_rostos.txt", "w") as f:
-                for nome, img in rostos.items():
-                    f.write(f"uint8_t {nome}[HEIGHT][WIDTH] = {{\n")
+        if len(rostos) > 0:
+            print("Gerando banco_rostos.h...")
+            with open("banco_rostos.h", "w") as f:
+                f.write("#ifndef BANCO_ROSTOS_H\n#define BANCO_ROSTOS_H\n\n")
+                f.write("#include <Arduino.h>\n\n")
+                f.write(f"const int NUM_ROSTOS = {len(rostos)};\n\n")
+                
+                # O 'const' garante que isso vá para a Flash, salvando a RAM!
+                f.write("const uint8_t banco_rostos[][64][64] = {\n")
+                
+                for idx, img in enumerate(rostos):
+                    f.write("    {\n")
                     for y in range(HEIGHT):
-                        f.write("    {")
+                        f.write("        {")
                         f.write(", ".join(str(p) for p in img[y]))
                         f.write("},\n" if y < HEIGHT - 1 else "}\n")
-                    f.write("};\n\n")
-            print("Sucesso! Arquivo 'banco_rostos.txt' criado.")
+                    f.write("    },\n" if idx < len(rostos) - 1 else "    }\n")
+                
+                f.write("};\n\n#endif\n")
+            print("Sucesso! Arquivo 'banco_rostos.h' criado.")
             break
         else:
-            print(f"Erro: Você capturou apenas {len(rostos)} de 3 rostos. Capture os que faltam!")
+            print("Erro: Capture pelo menos 1 rosto antes de salvar.")
 
 cap.release()
 cv2.destroyAllWindows()
