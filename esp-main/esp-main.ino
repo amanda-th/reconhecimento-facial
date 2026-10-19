@@ -3,81 +3,57 @@
 #include <WiFi.h>
 #include <esp_now.h>
 
-#include "banco_rostos.h"
-// Substitua pelo endereço MAC da sua segunda ESP32 (A que tem o Servo/LED)
-uint8_t macESP2[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; 
+// O arquivo de banco de dados precisará ser atualizado depois
+#include "banco_rostos.h" 
+
+// =========================================================================
+// CONFIGURAÇÕES DO LBP DA TURMA
+// =========================================================================
+#define BLOCO 3
+#define GRID_X 5
+#define GRID_Y 5
+#define TAMANHO_VETOR 6400 // 25 blocos * 256 bins
 
 #define WIDTH 64
 #define HEIGHT 64
 #define FRAME_SIZE (WIDTH * HEIGHT)
 
+// Matrizes globais para processamento na RAM
 uint8_t inputImage[HEIGHT][WIDTH];
-uint8_t outputImage[HEIGHT][WIDTH];
+int integralImage[HEIGHT + 1][WIDTH + 1];
+uint8_t resultadoLBP[HEIGHT][WIDTH];
+int vetorLBPH[TAMANHO_VETOR];
 
-// Estrutura do pacote de dados que será enviado via ESP-NOW
+// MAC Address da segunda ESP32 (Atuador)
+uint8_t macESP2[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; 
+
 typedef struct struct_mensagem {
     bool reconhecido;
 } struct_mensagem;
 
 struct_mensagem dadosEnvio;
 esp_now_peer_info_t peerInfo;
-
-const int Gx[3][3] = {{-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1}};
-const int Gy[3][3] = {{ 1, 2, 1}, { 0, 0, 0}, {-1,-2,-1}};
-
 TaskHandle_t TaskProcess_Handle;
 
 // =========================================================================
-void aplicarSobel() {
-    for (int y = 1; y < HEIGHT - 1; y++) {
-        for (int x = 1; x < WIDTH - 1; x++) {
-            int somaX = 0, somaY = 0;
-            for (int i = -1; i <= 1; i++) {
-                for (int j = -1; j <= 1; j++) {
-                    int pixel = inputImage[y + i][x + j];
-                    somaX += pixel * Gx[i + 1][j + 1];
-                    somaY += pixel * Gy[i + 1][j + 1];
-                }
-            }
-            int magnitude = sqrt((somaX * somaX) + (somaY * somaY));
-            if (magnitude > 255) magnitude = 255;
-            outputImage[y][x] = (uint8_t)magnitude;
-        }
+// FUNÇÕES MATEMÁTICAS DO LBP
+// =========================================================================
+int somaBloco(int x, int y, int tamanho) {
+    int x1 = x; int y1 = y; int x2 = x + tamanho; int y2 = y + tamanho;
+    return integralImage[y2][x2] - integralImage[y1][x2] - integralImage[y2][x1] + integralImage[y1][x1];
+}
+
+double calcularDistanciaEuclidiana(int *vetorNovaFoto, const double *vetorCentroide) {
+    double soma_quadrados = 0.0;
+    for (int i = 0; i < TAMANHO_VETOR; i++) {
+        double diferenca = (double)vetorNovaFoto[i] - vetorCentroide[i];
+        soma_quadrados += (diferenca * diferenca);
     }
+    return sqrt(soma_quadrados);
 }
 
 // =========================================================================
-// ALGORITMO DE CLASSIFICAÇÃO MELHORADO (SAD com Janela Deslizante)
-// O parâmetro agora indica QUAL rosto do banco de dados estamos comparando
-// =========================================================================
-long calcularSAD(const uint8_t rostoSalvo[HEIGHT][WIDTH]) {
-    long menorDiferenca = 2000000;
-    int margem = 3; // Mantemos a janela deslizante de -3 a +3 pixels
-
-    for (int offsetY = -margem; offsetY <= margem; offsetY++) {
-        for (int offsetX = -margem; offsetX <= margem; offsetX++) {
-            
-            long diferencaAtual = 0;
-            for (int y = 1; y < HEIGHT - 1; y++) {
-                for (int x = 1; x < WIDTH - 1; x++) {
-                    int mapY = y + offsetY;
-                    int mapX = x + offsetX;
-                    
-                    if (mapY >= 1 && mapY < HEIGHT - 1 && mapX >= 1 && mapX < WIDTH - 1) {
-                        diferencaAtual += abs(outputImage[y][x] - rostoSalvo[mapY][mapX]);
-                    } else {
-                        diferencaAtual += outputImage[y][x]; 
-                    }
-                }
-            }
-            
-            if (diferencaAtual < menorDiferenca) {
-                menorDiferenca = diferencaAtual;
-            }
-        }
-    }
-    return menorDiferenca;
-}
+// TAREFA 1: Aquisição Serial (CORE 0)
 // =========================================================================
 void receiveSerialTask(void *pvParameters) {
     for (;;) {
@@ -94,67 +70,104 @@ void receiveSerialTask(void *pvParameters) {
 }
 
 // =========================================================================
+// TAREFA 2: Processamento Digital de Imagem - PDI (CORE 1)
+// =========================================================================
 void processImageTask(void *pvParameters) {
+    int dx[8] = {0, 1, 2, 2, 2, 1, 0, 0};
+    int dy[8] = {0, 0, 0, 1, 2, 2, 2, 1};
+    int tamanhoRegiao = 3 * BLOCO;
+
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // 1. Extração de Características
-        aplicarSobel();
-
-        // O nosso erro final será o MENOR valor entre as três tentativas
-        long melhorSAD = 2000000;
-
-        // Um laço for que testa automaticamente TODOS os rostos do arquivo .h
-        for (int i = 0; i < NUM_ROSTOS; i++) {
-            long sad_atual = calcularSAD(banco_rostos[i]);
-            if (sad_atual < melhorSAD) {
-                melhorSAD = sad_atual;
+        // 1. Criar Imagem Integral (Mais rápido que acessar pixels um a um)
+        for (int y = 1; y <= HEIGHT; y++) {
+            for (int x = 1; x <= WIDTH; x++) {
+                integralImage[y][x] = inputImage[y - 1][x - 1]
+                    + integralImage[y - 1][x] + integralImage[y][x - 1]
+                    - integralImage[y - 1][x - 1];
             }
         }
-        
-        long threshold = 130000; 
-        bool ehOAluno = (melhorSAD < threshold);
 
-        // 3. ESP-NOW
+        // 2. Extração MB-LBP
+        memset(resultadoLBP, 0, sizeof(resultadoLBP)); // Limpa a matriz
+        for (int y = 0; y <= HEIGHT - tamanhoRegiao; y++) {
+            for (int x = 0; x <= WIDTH - tamanhoRegiao; x++) {
+                int cx = x + BLOCO; int cy = y + BLOCO;
+                int somaCentro = somaBloco(cx, cy, BLOCO);
+                uint8_t codigo = 0;
+                
+                for (int i = 0; i < 8; i++) {
+                    if (somaBloco(x + dx[i]*BLOCO, y + dy[i]*BLOCO, BLOCO) >= somaCentro) {
+                        codigo |= (1 << i);
+                    }
+                }
+                resultadoLBP[y + tamanhoRegiao/2][x + tamanhoRegiao/2] = codigo;
+            }
+        }
+
+        // 3. Calcular Histograma LBPH (Vetor de 6400 posições)
+        memset(vetorLBPH, 0, sizeof(vetorLBPH));
+        int wBloco = WIDTH / GRID_X;
+        int hBloco = HEIGHT / GRID_Y;
+
+        for (int gy = 0; gy < GRID_Y; gy++) {
+            for (int gx = 0; gx < GRID_X; gx++) {
+                int offset = (gy * GRID_X + gx) * 256;
+                int xFim = (gx == GRID_X - 1) ? WIDTH : (gx + 1) * wBloco;
+                int yFim = (gy == GRID_Y - 1) ? HEIGHT : (gy + 1) * hBloco;
+
+                for (int y = gy * hBloco; y < yFim; y++) {
+                    for (int x = gx * wBloco; x < xFim; x++) {
+                        vetorLBPH[offset + resultadoLBP[y][x]]++;
+                    }
+                }
+            }
+        }
+
+        // 4. Classificação com Distância Euclidiana
+        double menorDistancia = 9999999.0;
+        
+        for (int i = 0; i < NUM_ROSTOS; i++) {
+            double distAtual = calcularDistanciaEuclidiana(vetorLBPH, banco_rostos[i]);
+            if (distAtual < menorDistancia) {
+                menorDistancia = distAtual;
+            }
+        }
+
+        // Limiar provisório - você precisará calibrar isso vendo o terminal
+        double threshold = 50.0; 
+        bool ehOAluno = (menorDistancia <= threshold);
+
+        // 5. ESP-NOW e Feedback
         dadosEnvio.reconhecido = ehOAluno;
         esp_now_send(macESP2, (uint8_t *) &dadosEnvio, sizeof(dadosEnvio));
 
-        // 4. Feedback
         if (ehOAluno) {
-            Serial.printf("ACESSO LIBERADO Amanda! (Melhor SAD: %ld)\n", melhorSAD);
+            Serial.printf("ACESSO LIBERADO! (Distancia: %.2f)\n", menorDistancia);
         } else {
-            Serial.printf("ACESSO NEGADO (Melhor SAD: %ld)\n", melhorSAD);
+            Serial.printf("ACESSO NEGADO (Distancia: %.2f)\n", menorDistancia);
         }
+        
+        Serial.println("OK"); // Libera o Python para o próximo frame
     }
 }
+
 // =========================================================================
 void setup() {
     Serial.begin(115200);
     Serial.setTimeout(500); 
 
-    // Inicialização do Wi-Fi em modo Station (necessário para ESP-NOW)
     WiFi.mode(WIFI_STA);
+    if (esp_now_init() != ESP_OK) return;
 
-    // Inicializa o protocolo ESP-NOW
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("Erro ao inicializar ESP-NOW");
-        return;
-    }
-
-    // Registra a segunda ESP32 (Peer) para podermos enviar dados para ela
     memcpy(peerInfo.peer_addr, macESP2, 6);
     peerInfo.channel = 0;  
     peerInfo.encrypt = false;
-    
-    if (esp_now_add_peer(&peerInfo) != ESP_OK){
-        Serial.println("Falha ao adicionar peer");
-        return;
-    }
+    esp_now_add_peer(&peerInfo);
 
     xTaskCreatePinnedToCore(receiveSerialTask, "RxTask", 4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(processImageTask, "ProcTask", 8192, NULL, 2, &TaskProcess_Handle, 1);
 }
 
-void loop() {
-    vTaskDelete(NULL); 
-}
+void loop() { vTaskDelete(NULL); }
