@@ -72,6 +72,9 @@ void receiveSerialTask(void *pvParameters) {
 // =========================================================================
 // TAREFA 2: Processamento Digital de Imagem - PDI (CORE 1)
 // =========================================================================
+// =========================================================================
+// TAREFA 2: Processamento Digital de Imagem - PDI (CORE 1)
+// =========================================================================
 void processImageTask(void *pvParameters) {
     int dx[8] = {0, 1, 2, 2, 2, 1, 0, 0};
     int dy[8] = {0, 0, 0, 1, 2, 2, 2, 1};
@@ -80,7 +83,7 @@ void processImageTask(void *pvParameters) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // 1. Criar Imagem Integral (Mais rápido que acessar pixels um a um)
+        // 1. Criar Imagem Integral
         for (int y = 1; y <= HEIGHT; y++) {
             for (int x = 1; x <= WIDTH; x++) {
                 integralImage[y][x] = inputImage[y - 1][x - 1]
@@ -90,7 +93,7 @@ void processImageTask(void *pvParameters) {
         }
 
         // 2. Extração MB-LBP
-        memset(resultadoLBP, 0, sizeof(resultadoLBP)); // Limpa a matriz
+        memset(resultadoLBP, 0, sizeof(resultadoLBP)); 
         for (int y = 0; y <= HEIGHT - tamanhoRegiao; y++) {
             for (int x = 0; x <= WIDTH - tamanhoRegiao; x++) {
                 int cx = x + BLOCO; int cy = y + BLOCO;
@@ -106,7 +109,10 @@ void processImageTask(void *pvParameters) {
             }
         }
 
-        // 3. Calcular Histograma LBPH (Vetor de 6400 posições)
+        // RESPIRA: Alimenta o Watchdog Timer para evitar o reinício
+        vTaskDelay(pdMS_TO_TICKS(2));
+
+        // 3. Calcular Histograma
         memset(vetorLBPH, 0, sizeof(vetorLBPH));
         int wBloco = WIDTH / GRID_X;
         int hBloco = HEIGHT / GRID_Y;
@@ -125,17 +131,24 @@ void processImageTask(void *pvParameters) {
             }
         }
 
+        // RESPIRA de novo após a varredura
+        vTaskDelay(pdMS_TO_TICKS(2));
+
         // 4. Classificação com Distância Euclidiana
         double menorDistancia = 9999999.0;
+        int idIdentificado = 0; // Inicia em 0 para blindar contra o erro de índice -1
         
         for (int i = 0; i < NUM_ROSTOS; i++) {
             double distAtual = calcularDistanciaEuclidiana(vetorLBPH, banco_rostos[i]);
             if (distAtual < menorDistancia) {
                 menorDistancia = distAtual;
+                idIdentificado = i; 
             }
+            
+            // Como o banco da turma é grande, respiramos a cada comparação pesada
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
 
-        // Limiar provisório - você precisará calibrar isso vendo o terminal
         double threshold = 50.0; 
         bool ehOAluno = (menorDistancia <= threshold);
 
@@ -143,16 +156,18 @@ void processImageTask(void *pvParameters) {
         dadosEnvio.reconhecido = ehOAluno;
         esp_now_send(macESP2, (uint8_t *) &dadosEnvio, sizeof(dadosEnvio));
 
-        if (ehOAluno) {
-            Serial.printf("ACESSO LIBERADO! (Distancia: %.2f)\n", menorDistancia);
-        } else {
-            Serial.printf("ACESSO NEGADO (Distancia: %.2f)\n", menorDistancia);
+        // Proteção extra para garantir que o banco de dados carregou
+        if (NUM_ROSTOS > 0) {
+            if (ehOAluno) {
+                Serial.printf("ACESSO LIBERADO! Identificado como: %s (Distancia: %.2f)\n", nomes_rostos[idIdentificado], menorDistancia);
+            } else {
+                Serial.printf("ACESSO NEGADO! (Parecido com %s, dist: %.2f)\n", nomes_rostos[idIdentificado], menorDistancia);
+            }
         }
         
-        Serial.println("OK"); // Libera o Python para o próximo frame
+        Serial.println("OK"); 
     }
 }
-
 // =========================================================================
 void setup() {
     Serial.begin(115200);
