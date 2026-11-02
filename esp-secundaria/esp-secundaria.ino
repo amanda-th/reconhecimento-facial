@@ -19,7 +19,7 @@ struct_mensagem dadosRecebidos;
 // =========================================================================
 // CALLBACK: Função chamada automaticamente sempre que um pacote chegar
 // =========================================================================
-void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+void OnDataRecv(const esp_now_recv_info_t * esp_now_info, const uint8_t *incomingData, int len) {
     // Copia os bytes recebidos para a nossa variável
     memcpy(&dadosRecebidos, incomingData, sizeof(dadosRecebidos));
 
@@ -60,6 +60,7 @@ void setup() {
 
     // 2. Configura Wi-Fi em modo Station
     WiFi.mode(WIFI_STA);
+    delay(1000); // Dá 1 segundo para o rádio Wi-Fi ligar fisicamente
 
     // =========================================================================
     // O MOMENTO MÁGICO: Imprime o MAC Address que você precisa!

@@ -2,77 +2,95 @@ import cv2
 import serial
 import time
 import sys
+import threading
 
-# NECESSÁRIO: pip install opencv-python pyserial
-# Sistema de aquisição Câmera + Memória: apenas para captura a imagem da webcam e redimensiona
-
-# Configurações do Sistema
-SERIAL_PORT = 'COM7'  # Altere para /dev/ttyACM0 ou COM3 se necessário
-BAUD_RATE = 115200          # Taxa de transmissão de dados (deve ser igual na ESP32)
+SERIAL_PORT = 'COM7' 
+BAUD_RATE = 115200
 WIDTH = 64
 HEIGHT = 64
 
-# 1. Inicializa a porta Serial
+frame_para_enviar = None
+rodando = True
+
 try:
-    esp_serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2)
+    esp_serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=5)
     print(f"Sucesso: Conectado a {SERIAL_PORT}")
 except Exception as e:
-    print(f"Erro ao abrir a porta serial. Verifique a conexão e as permissões.\n{e}")
+    print(f"Erro ao abrir a porta serial.\n{e}")
     sys.exit()
 
-# Dá um tempo para a ESP32 reiniciar (comportamento padrão ao abrir a porta serial)
 time.sleep(2)
 
-# 2. Inicializa a Webcam (0 costuma ser a webcam integrada)
+# =========================================================================
+# THREAD SECUNDÁRIA: Comunicação com a ESP32
+# =========================================================================
+def thread_comunicacao_esp():
+    global frame_para_enviar, rodando
+    while rodando:
+        if frame_para_enviar is not None:
+            frame_atual = frame_para_enviar.copy()
+            image_bytes = frame_atual.flatten().tobytes()
+            
+            esp_serial.write(b'S')
+            esp_serial.write(image_bytes)
+            
+            resposta = esp_serial.readline().decode('utf-8', errors='ignore').strip()
+            if resposta:
+                print(f"ESP32 respondeu: {resposta}")
+                if "ACESSO" in resposta:
+                    _ = esp_serial.readline().decode('utf-8', errors='ignore').strip()
+        else:
+            time.sleep(0.1)
+
+thread_esp = threading.Thread(target=thread_comunicacao_esp)
+thread_esp.start()
+
+# =========================================================================
+# THREAD PRINCIPAL: Rastreamento Facial Inteligente (Haar Cascade)
+# =========================================================================
+# Carrega o modelo pré-treinado do OpenCV para faces frontais
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 cap = cv2.VideoCapture(0)
 
-if not cap.isOpened():
-    print("Erro: Não foi possível abrir a câmera.")
-    sys.exit()
-
-print("Iniciando captura e envio... Pressione 'q' na janela de vídeo para encerrar.")
+print("Sistema iniciado com Rastreamento Dinâmico. Pressione 'q' para sair.")
 
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("Erro ao ler o frame da câmera.")
         break
 
-    # 3. Pré-processamento
-    # Converte para tons de cinza (matriz 2D de 8 bits por pixel)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Redimensiona para 64x64 pixels
-    resized = cv2.resize(gray, (WIDTH, HEIGHT))
-
-    # Mostra na tela do PC o que a ESP32 está "vendo"
-    cv2.imshow("Visão do Sistema de Aquisição", resized)
-
-    # 4. Preparação dos Dados
-    # Achata a matriz 2D (64x64) em um array 1D de 4096 bytes
-    image_bytes = resized.flatten().tobytes()
-
-    # 5. Comunicação e Handshake (Controle de Fluxo)
-    # Enviamos um marcador de início (o caractere 'S' de Start)
-    # Isso impede que a ESP32 comece a ler os dados no meio de um frame
-    esp_serial.write(b'S') 
+    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
-    # Envia o pacote de imagem
-    esp_serial.write(image_bytes)
-    
-    # Espera a ESP32 processar o Sobel e responder antes de mandar o próximo frame.
-    # Sem isso, o PC enviaria dados mais rápido do que a ESP32 consegue processar, estourando o buffer.
-    resposta = esp_serial.readline().decode('utf-8').strip()
-    
-    if resposta:
-        print(f"ESP32 respondeu: {resposta}")
+    # Detecta rostos na imagem em tempo real, ajustando a escala automaticamente
+    faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
 
-    # Condição de saída
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    # Se detectar pelo menos um rosto, processa o primeiro
+    if len(faces) > 0:
+        (x, y, w, h) = faces[0]
+        
+        # Recorta estritamente a região do rosto rastreado
+        rosto_cortado = gray_frame[y:y+h, x:x+w]
+        
+        # Redimensiona a área detectada para o padrão rígido da ESP32
+        resized = cv2.resize(rosto_cortado, (WIDTH, HEIGHT))
+        
+        # Atualiza a matriz que será enviada via Serial
+        frame_para_enviar = resized
+
+        # Desenha o quadrado verde acompanhando o movimento
+        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        cv2.imshow("O que a ESP32 enxerga (Normalizado)", resized)
+    else:
+        # Se você sair do quadro, bloqueia o envio de ruído para a placa
+        frame_para_enviar = None
+
+    cv2.imshow("Visao Geral com Rastreamento", frame)
+
+    if cv2.waitKey(30) & 0xFF == ord('q'):
+        rodando = False
         break
 
-# Limpeza e encerramento
 cap.release()
 esp_serial.close()
 cv2.destroyAllWindows()
-print("Sistema encerrado.")
+thread_esp.join()

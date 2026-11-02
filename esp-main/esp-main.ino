@@ -25,7 +25,7 @@ uint8_t resultadoLBP[HEIGHT][WIDTH];
 int vetorLBPH[TAMANHO_VETOR];
 
 // MAC Address da segunda ESP32 (Atuador)
-uint8_t macESP2[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; 
+uint8_t macESP2[] = {0x20, 0x9B, 0xA9, 0x8F, 0xFC, 0xE4}; 
 
 typedef struct struct_mensagem {
     bool reconhecido;
@@ -149,7 +149,8 @@ void processImageTask(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
 
-        double threshold = 50.0; 
+        // Média entre o seu pior caso aceitável (~176) e o risco de um intruso (~192): (176 + 192) / 2 = 184
+        double threshold = 184.0;
         bool ehOAluno = (menorDistancia <= threshold);
 
         // 5. ESP-NOW e Feedback
