@@ -9,16 +9,17 @@
 
 Servo tranca;
 
-// ==========================================
-// CONFIGURAÇÕES DE TEMPO E "PENSAMENTO"
-// ==========================================
 bool portaAberta = false;
 unsigned long tempoAbertura = 0;
-const unsigned long TEMPO_PERMANENCIA = 5000; // Tempo de porta aberta: 5 segundos
+const unsigned long TEMPO_PERMANENCIA = 5000;
 
-// NOVIDADE: A placa agora "pensa" antes de abrir
+// NOVIDADE: Variáveis do Cooldown (Período de Refração)
+unsigned long tempoUltimoFechamento = 0;
+const unsigned long TEMPO_COOLDOWN = 1500; // Fica "surdo" por 1.5s após fechar
+
 int contadorReconhecimento = 0;
-const int FOTOS_NECESSARIAS = 3; // Exige 3 acertos seguidos para abrir a porta
+const int FOTOS_NECESSARIAS = 3; 
+bool servoJaEstaNoZero = false; 
 
 typedef struct struct_mensagem {
     bool reconhecido;
@@ -26,40 +27,47 @@ typedef struct struct_mensagem {
 
 struct_mensagem dadosRecebidos;
 
-// Função que recebe o sinal do Python
+void moverServo(int angulo) {
+    tranca.attach(PINO_SERVO); 
+    tranca.write(angulo);      
+    delay(500);                
+    tranca.detach();           
+}
+
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
     memcpy(&dadosRecebidos, incomingData, sizeof(dadosRecebidos));
     
-    // Só processa se a porta estiver trancada
+    // Regra 1: Só avalia novos acessos se a porta já estiver fechada
     if (!portaAberta) {
-        if (dadosRecebidos.reconhecido == true) {
+        
+        // Regra 2: Só escuta a câmera se o "Cooldown" de fechamento já passou!
+        if (millis() - tempoUltimoFechamento > TEMPO_COOLDOWN) {
             
-            // Em vez de abrir na hora, adiciona na contagem!
-            contadorReconhecimento++;
-            Serial.print("Analisando rosto... Confirmacao: ");
-            Serial.print(contadorReconhecimento);
-            Serial.print(" de ");
-            Serial.println(FOTOS_NECESSARIAS);
-
-            // Se atingiu as 3 confirmações seguidas, destrava!
-            if (contadorReconhecimento >= FOTOS_NECESSARIAS) {
-                tranca.write(90); 
-                digitalWrite(PINO_LED_VERDE, HIGH);
-                digitalWrite(PINO_LED_VERMELHO, LOW);
+            if (dadosRecebidos.reconhecido == true) {
+                contadorReconhecimento++;
                 
-                portaAberta = true;
-                tempoAbertura = millis();
-                contadorReconhecimento = 0; // Zera para a próxima pessoa
-                Serial.println("ACESSO CONFIRMADO! Porta destrancada por 5 segundos.");
+                if (contadorReconhecimento >= FOTOS_NECESSARIAS) {
+                    moverServo(90); 
+                    digitalWrite(PINO_LED_VERDE, HIGH);
+                    digitalWrite(PINO_LED_VERMELHO, LOW);
+                    
+                    portaAberta = true;
+                    servoJaEstaNoZero = false; 
+                    tempoAbertura = millis();
+                    contadorReconhecimento = 0; 
+                    Serial.println("ACESSO LIBERADO!");
+                }
+            } else {
+                contadorReconhecimento = 0;
+                
+                if (!servoJaEstaNoZero) {
+                    moverServo(0); 
+                    digitalWrite(PINO_LED_VERDE, LOW);
+                    digitalWrite(PINO_LED_VERMELHO, HIGH);
+                    servoJaEstaNoZero = true; 
+                    Serial.println("Porta trancada e aguardando rosto...");
+                }
             }
-            
-        } else {
-            // Se der acesso negado, quebra a sequência. A pessoa tem que ficar parada.
-            contadorReconhecimento = 0;
-            
-            tranca.write(0); // Garante que o motor fique no 0
-            digitalWrite(PINO_LED_VERDE, LOW);
-            digitalWrite(PINO_LED_VERMELHO, HIGH);
         }
     }
 }
@@ -67,14 +75,13 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
 void setup() {
     Serial.begin(115200);
     
-    tranca.attach(PINO_SERVO);
     pinMode(PINO_LED_VERDE, OUTPUT);
     pinMode(PINO_LED_VERMELHO, OUTPUT);
     
-    // Posição inicial segura (Trancada)
-    tranca.write(0);
+    moverServo(0);
     digitalWrite(PINO_LED_VERDE, LOW);
-    digitalWrite(PINO_LED_VERMELHO, LOW);
+    digitalWrite(PINO_LED_VERMELHO, HIGH); 
+    servoJaEstaNoZero = true;
 
     WiFi.mode(WIFI_STA);
     if (esp_now_init() != ESP_OK) {
@@ -86,16 +93,21 @@ void setup() {
 }
 
 void loop() {
-    // Relógio que tranca a porta sozinha após 5 segundos
     if (portaAberta) {
         if (millis() - tempoAbertura >= TEMPO_PERMANENCIA) {
-            tranca.write(0);
+            moverServo(0);
             digitalWrite(PINO_LED_VERDE, LOW);
-            digitalWrite(PINO_LED_VERMELHO, LOW);
+            digitalWrite(PINO_LED_VERMELHO, HIGH);
             
             portaAberta = false;
-            Serial.println("Tempo esgotado. Porta trancada novamente.");
+            servoJaEstaNoZero = true; 
+            
+            // Inicia o cronômetro do Cooldown no exato momento que a porta fecha
+            tempoUltimoFechamento = millis(); 
+            contadorReconhecimento = 0; // Zera qualquer contagem fantasma
+            
+            Serial.println("Tempo esgotado. Porta trancada. Cooldown ativado.");
         }
     }
-    delay(10); // Respiro pro microcontrolador
+    delay(10); 
 }
