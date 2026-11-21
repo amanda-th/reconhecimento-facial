@@ -15,7 +15,7 @@ BINS = 256
 TAMANHO_VETOR = GRID_X * GRID_Y * BINS
 
 def extrair_nome(caminho_arquivo):
-    # Pega só o nome do arquivo (ex: "Andre_20260929_151219_479671.jpg")
+    # Pega só o nome do arquivo (ex: "Andre_20260929_151219_479671.bmp")
     nome_base = os.path.basename(caminho_arquivo)
     # Tira a extensão
     nome_base = os.path.splitext(nome_base)[0]
@@ -76,16 +76,19 @@ def extrair_lbph(img_gray):
 # =====================================================================
 # INÍCIO DO PROCESSAMENTO
 # =====================================================================
-print("Lendo imagens da turma e extraindo características...")
+print("Lendo imagens processadas e extraindo características...")
 
 # Dicionário para agrupar as fotos por pessoa (K-means / Média)
 agrupamento_pessoas = {}
 
-# Puxa todas as imagens da pasta
-arquivos = glob.glob("imagens/*.jpg") + glob.glob("imagens/*.jpeg")
+# Puxa TODAS as imagens da pasta PROCESSADA (incluindo bmp e png)
+arquivos = (glob.glob("imagens_processadas/*.jpg") + 
+            glob.glob("imagens_processadas/*.jpeg") + 
+            glob.glob("imagens_processadas/*.bmp") + 
+            glob.glob("imagens_processadas/*.png"))
 
 if not arquivos:
-    print("ERRO: Nenhuma imagem encontrada na pasta 'imagens/'.")
+    print("ERRO: Nenhuma imagem encontrada na pasta 'imagens_processadas/'.")
     exit()
 
 for arquivo in arquivos:
@@ -113,7 +116,7 @@ for arquivo in arquivos:
 # =====================================================================
 print("\nCalculando os centroides (Médias) e gerando banco_rostos.h...")
 
-# Coloque aqui o caminho exato da pasta do seu projeto da ESP32
+# Caminho exato da pasta do seu projeto da ESP32
 caminho_esp32 = r"C:\Users\amand\OneDrive\Documentos\GitHub\reconhecimento-facial\esp-main\banco_rostos.h"
 
 with open(caminho_esp32, "w") as f:

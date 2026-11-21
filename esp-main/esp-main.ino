@@ -149,8 +149,8 @@ void processImageTask(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
 
-        // Média entre o seu pior caso aceitável (~176) e o risco de um intruso (~192): (176 + 192) / 2 = 184
-        double threshold = 184.0;
+        // mudou o algoritmo tive que mudar o limiar tbm
+        double threshold = 100.0;
         bool ehOAluno = (menorDistancia <= threshold);
 
         // 5. ESP-NOW e Feedback

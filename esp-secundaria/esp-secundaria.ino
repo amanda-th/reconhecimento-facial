@@ -1,86 +1,101 @@
+#include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
 #include <ESP32Servo.h>
 
-// Definição dos pinos físicos
 #define PINO_SERVO 18
-#define LED_VERDE 19
-#define LED_VERMELHO 21
+#define PINO_LED_VERDE 19 
+#define PINO_LED_VERMELHO 21
 
-Servo trancaServo;
+Servo tranca;
 
-// A estrutura DEVE ser exatamente igual à da ESP32 transmissora
+// ==========================================
+// CONFIGURAÇÕES DE TEMPO E "PENSAMENTO"
+// ==========================================
+bool portaAberta = false;
+unsigned long tempoAbertura = 0;
+const unsigned long TEMPO_PERMANENCIA = 5000; // Tempo de porta aberta: 5 segundos
+
+// NOVIDADE: A placa agora "pensa" antes de abrir
+int contadorReconhecimento = 0;
+const int FOTOS_NECESSARIAS = 3; // Exige 3 acertos seguidos para abrir a porta
+
 typedef struct struct_mensagem {
     bool reconhecido;
 } struct_mensagem;
 
 struct_mensagem dadosRecebidos;
 
-// =========================================================================
-// CALLBACK: Função chamada automaticamente sempre que um pacote chegar
-// =========================================================================
-void OnDataRecv(const esp_now_recv_info_t * esp_now_info, const uint8_t *incomingData, int len) {
-    // Copia os bytes recebidos para a nossa variável
+// Função que recebe o sinal do Python
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
     memcpy(&dadosRecebidos, incomingData, sizeof(dadosRecebidos));
+    
+    // Só processa se a porta estiver trancada
+    if (!portaAberta) {
+        if (dadosRecebidos.reconhecido == true) {
+            
+            // Em vez de abrir na hora, adiciona na contagem!
+            contadorReconhecimento++;
+            Serial.print("Analisando rosto... Confirmacao: ");
+            Serial.print(contadorReconhecimento);
+            Serial.print(" de ");
+            Serial.println(FOTOS_NECESSARIAS);
 
-    if (dadosRecebidos.reconhecido) {
-        Serial.println("Sinal recebido: ACESSO LIBERADO. Abrindo tranca...");
-        digitalWrite(LED_VERDE, HIGH);
-        digitalWrite(LED_VERMELHO, LOW);
-        trancaServo.write(90); // Gira o servo para 90 graus (Abre)
-        
-    } else {
-        Serial.println("Sinal recebido: ACESSO NEGADO. Mantendo tranca fechada.");
-        digitalWrite(LED_VERDE, LOW);
-        digitalWrite(LED_VERMELHO, HIGH);
-        trancaServo.write(0); // Volta o servo para 0 graus (Fecha)
+            // Se atingiu as 3 confirmações seguidas, destrava!
+            if (contadorReconhecimento >= FOTOS_NECESSARIAS) {
+                tranca.write(90); 
+                digitalWrite(PINO_LED_VERDE, HIGH);
+                digitalWrite(PINO_LED_VERMELHO, LOW);
+                
+                portaAberta = true;
+                tempoAbertura = millis();
+                contadorReconhecimento = 0; // Zera para a próxima pessoa
+                Serial.println("ACESSO CONFIRMADO! Porta destrancada por 5 segundos.");
+            }
+            
+        } else {
+            // Se der acesso negado, quebra a sequência. A pessoa tem que ficar parada.
+            contadorReconhecimento = 0;
+            
+            tranca.write(0); // Garante que o motor fique no 0
+            digitalWrite(PINO_LED_VERDE, LOW);
+            digitalWrite(PINO_LED_VERMELHO, HIGH);
+        }
     }
 }
 
-// =========================================================================
 void setup() {
     Serial.begin(115200);
     
-    // 1. Configura os Pinos
-    pinMode(LED_VERDE, OUTPUT);
-    pinMode(LED_VERMELHO, OUTPUT);
+    tranca.attach(PINO_SERVO);
+    pinMode(PINO_LED_VERDE, OUTPUT);
+    pinMode(PINO_LED_VERMELHO, OUTPUT);
     
-    // Estado inicial: Tranca fechada (Vermelho aceso, Servo em 0)
-    digitalWrite(LED_VERDE, LOW);
-    digitalWrite(LED_VERMELHO, HIGH);
-    
-    // Configura o Servo de acordo com as exigências da ESP32
-    ESP32PWM::allocateTimer(0);
-    ESP32PWM::allocateTimer(1);
-    ESP32PWM::allocateTimer(2);
-    ESP32PWM::allocateTimer(3);
-    trancaServo.setPeriodHertz(50); // Frequência padrão de servos
-    trancaServo.attach(PINO_SERVO, 500, 2400); // Pinos e larguras de pulso
-    trancaServo.write(0);
+    // Posição inicial segura (Trancada)
+    tranca.write(0);
+    digitalWrite(PINO_LED_VERDE, LOW);
+    digitalWrite(PINO_LED_VERMELHO, LOW);
 
-    // 2. Configura Wi-Fi em modo Station
     WiFi.mode(WIFI_STA);
-    delay(1000); // Dá 1 segundo para o rádio Wi-Fi ligar fisicamente
-
-    // =========================================================================
-    // O MOMENTO MÁGICO: Imprime o MAC Address que você precisa!
-    // =========================================================================
-    Serial.println("\n--- INFORMAÇÕES DA PLACA ---");
-    Serial.print("Endereço MAC desta ESP32: ");
-    Serial.println(WiFi.macAddress());
-    Serial.println("----------------------------\n");
-
-    // 3. Inicializa ESP-NOW
     if (esp_now_init() != ESP_OK) {
-        Serial.println("Erro ao inicializar ESP-NOW");
+        Serial.println("Erro ESP-NOW");
         return;
     }
-
-    // Registra a função de Callback para quando receber dados
-    esp_now_register_recv_cb(OnDataRecv);
+    
+    esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
 }
 
 void loop() {
-    // Como a recepção de dados via rádio é feita por hardware/interrupção (Callback),
-    // o loop principal pode ficar completamente vazio! O microcontrolador fica livre.
+    // Relógio que tranca a porta sozinha após 5 segundos
+    if (portaAberta) {
+        if (millis() - tempoAbertura >= TEMPO_PERMANENCIA) {
+            tranca.write(0);
+            digitalWrite(PINO_LED_VERDE, LOW);
+            digitalWrite(PINO_LED_VERMELHO, LOW);
+            
+            portaAberta = false;
+            Serial.println("Tempo esgotado. Porta trancada novamente.");
+        }
+    }
+    delay(10); // Respiro pro microcontrolador
 }
