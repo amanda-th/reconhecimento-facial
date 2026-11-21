@@ -29,6 +29,8 @@ def aplicar_tan_triggs(imagem_cortada):
 # =========================================================================
 # CONFIGURAÇÕES INICIAIS E SISTEMA DE LOG (CSV)
 # =========================================================================
+
+# No linux SERIAL_PORT = '/dev/ttyUSB0' ou /dev/ttyACM0, dependendo da placa
 SERIAL_PORT = 'COM7' 
 BAUD_RATE = 115200
 WIDTH = 64
