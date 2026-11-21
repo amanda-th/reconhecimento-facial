@@ -9,17 +9,32 @@
 
 Servo tranca;
 
-bool portaAberta = false;
-unsigned long tempoAbertura = 0;
-const unsigned long TEMPO_PERMANENCIA = 5000;
+// =========================================================================
+// MÁQUINA DE ESTADOS E TEMPORIZADORES
+// =========================================================================
+enum EstadoPorta {
+    TRANCADA,
+    MOVENDO_PARA_ABRIR,
+    ABERTA,
+    MOVENDO_PARA_FECHAR
+};
 
-// NOVIDADE: Variáveis do Cooldown (Período de Refração)
+EstadoPorta estadoAtual = TRANCADA;
+
+unsigned long tempoAbertura = 0;
+unsigned long tempoInicioMovimento = 0;
 unsigned long tempoUltimoFechamento = 0;
-const unsigned long TEMPO_COOLDOWN = 1500; // Fica "surdo" por 1.5s após fechar
+
+const unsigned long TEMPO_PERMANENCIA = 5000;
+const unsigned long TEMPO_MOVIMENTO_SERVO = 500; 
+const unsigned long TEMPO_COOLDOWN = 1500;
+
+// Flags de comunicação entre o Callback (Wi-Fi) e o Loop (Física)
+volatile bool solicitarAbertura = false;
+volatile bool solicitarFechamento = false;
 
 int contadorReconhecimento = 0;
 const int FOTOS_NECESSARIAS = 3; 
-bool servoJaEstaNoZero = false; 
 
 typedef struct struct_mensagem {
     bool reconhecido;
@@ -27,62 +42,46 @@ typedef struct struct_mensagem {
 
 struct_mensagem dadosRecebidos;
 
-void moverServo(int angulo) {
-    tranca.attach(PINO_SERVO); 
-    tranca.write(angulo);      
-    delay(500);                
-    tranca.detach();           
-}
-
+// =========================================================================
+// CALLBACK DO ESP-NOW (Rápido, sem delays)
+// =========================================================================
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
     memcpy(&dadosRecebidos, incomingData, sizeof(dadosRecebidos));
     
-    // Regra 1: Só avalia novos acessos se a porta já estiver fechada
-    if (!portaAberta) {
-        
-        // Regra 2: Só escuta a câmera se o "Cooldown" de fechamento já passou!
+    if (estadoAtual == TRANCADA) {
         if (millis() - tempoUltimoFechamento > TEMPO_COOLDOWN) {
             
             if (dadosRecebidos.reconhecido == true) {
                 contadorReconhecimento++;
-                
                 if (contadorReconhecimento >= FOTOS_NECESSARIAS) {
-                    moverServo(90); 
-                    digitalWrite(PINO_LED_VERDE, HIGH);
-                    digitalWrite(PINO_LED_VERMELHO, LOW);
-                    
-                    portaAberta = true;
-                    servoJaEstaNoZero = false; 
-                    tempoAbertura = millis();
+                    solicitarAbertura = true; // Levanta a bandeira, não roda motor aqui!
                     contadorReconhecimento = 0; 
-                    Serial.println("ACESSO LIBERADO!");
                 }
             } else {
                 contadorReconhecimento = 0;
-                
-                if (!servoJaEstaNoZero) {
-                    moverServo(0); 
-                    digitalWrite(PINO_LED_VERDE, LOW);
-                    digitalWrite(PINO_LED_VERMELHO, HIGH);
-                    servoJaEstaNoZero = true; 
-                    Serial.println("Porta trancada e aguardando rosto...");
-                }
+                solicitarFechamento = true; 
             }
         }
     }
 }
 
+// =========================================================================
+// SETUP
+// =========================================================================
 void setup() {
     Serial.begin(115200);
     
     pinMode(PINO_LED_VERDE, OUTPUT);
     pinMode(PINO_LED_VERMELHO, OUTPUT);
     
-    moverServo(0);
+    tranca.attach(PINO_SERVO);
+    tranca.write(0);
+    delay(500); // Apenas no boot é aceitável
+    tranca.detach();
+    
     digitalWrite(PINO_LED_VERDE, LOW);
     digitalWrite(PINO_LED_VERMELHO, HIGH); 
-    servoJaEstaNoZero = true;
-
+    
     WiFi.mode(WIFI_STA);
     if (esp_now_init() != ESP_OK) {
         Serial.println("Erro ESP-NOW");
@@ -92,22 +91,69 @@ void setup() {
     esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
 }
 
+// =========================================================================
+// LOOP PRINCIPAL (Máquina de Estados Não-Bloqueante)
+// =========================================================================
 void loop() {
-    if (portaAberta) {
-        if (millis() - tempoAbertura >= TEMPO_PERMANENCIA) {
-            moverServo(0);
-            digitalWrite(PINO_LED_VERDE, LOW);
-            digitalWrite(PINO_LED_VERMELHO, HIGH);
+    
+    switch (estadoAtual) {
+        
+        case TRANCADA:
+            if (solicitarAbertura) {
+                solicitarAbertura = false;
+                solicitarFechamento = false;
+                
+                tranca.attach(PINO_SERVO);
+                tranca.write(90);
+                digitalWrite(PINO_LED_VERDE, HIGH);
+                digitalWrite(PINO_LED_VERMELHO, LOW);
+                
+                estadoAtual = MOVENDO_PARA_ABRIR;
+                tempoInicioMovimento = millis();
+                Serial.println("ACESSO LIBERADO: Iniciando abertura...");
+            }
+            else if (solicitarFechamento) {
+                solicitarFechamento = false;
+                // Motor já está em 0, só garante os LEDs
+                digitalWrite(PINO_LED_VERDE, LOW);
+                digitalWrite(PINO_LED_VERMELHO, HIGH);
+            }
+            break;
             
-            portaAberta = false;
-            servoJaEstaNoZero = true; 
+        case MOVENDO_PARA_ABRIR:
+            // Aguarda o tempo mecânico do motor sem travar o processador
+            if (millis() - tempoInicioMovimento >= TEMPO_MOVIMENTO_SERVO) {
+                tranca.detach();
+                estadoAtual = ABERTA;
+                tempoAbertura = millis();
+                Serial.println("Porta fisicamente aberta.");
+            }
+            break;
             
-            // Inicia o cronômetro do Cooldown no exato momento que a porta fecha
-            tempoUltimoFechamento = millis(); 
-            contadorReconhecimento = 0; // Zera qualquer contagem fantasma
+        case ABERTA:
+            if (millis() - tempoAbertura >= TEMPO_PERMANENCIA) {
+                tranca.attach(PINO_SERVO);
+                tranca.write(0);
+                digitalWrite(PINO_LED_VERDE, LOW);
+                digitalWrite(PINO_LED_VERMELHO, HIGH);
+                
+                estadoAtual = MOVENDO_PARA_FECHAR;
+                tempoInicioMovimento = millis();
+                Serial.println("Tempo esgotado: Iniciando fechamento...");
+            }
+            break;
             
-            Serial.println("Tempo esgotado. Porta trancada. Cooldown ativado.");
-        }
+        case MOVENDO_PARA_FECHAR:
+            if (millis() - tempoInicioMovimento >= TEMPO_MOVIMENTO_SERVO) {
+                tranca.detach();
+                estadoAtual = TRANCADA;
+                tempoUltimoFechamento = millis();
+                solicitarAbertura = false; // Limpa lixo residual de pacotes
+                Serial.println("Porta fisicamente trancada. Cooldown ativado.");
+            }
+            break;
     }
+    
+    // O microcontrolador respira livremente a cada ciclo
     delay(10); 
 }
