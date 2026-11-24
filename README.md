@@ -139,7 +139,6 @@ Com o reconhecimento funcionando, a atenção passou para o lado físico. A mont
 
 * O servo passou a ser alimentado pelo pino VIN/5V.
 * Criei a flag `servoJaEstaNoZero`, para a atuadora mandar o comando de trancar uma única vez, e não a cada pacote "negado".
-* A função `moverServo()` agora faz `attach()`, move, espera 500 ms e faz `detach()`. Com o `detach()`, o sinal PWM é desligado depois do movimento, e o servo deixa de sofrer interferência enquanto o rádio trabalha.
 
 ### Fase 5: Sincronia entre tela e porta, e condições de corrida
 
