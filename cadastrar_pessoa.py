@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import simpledialog
 
 # =========================================================================
-# CONFIGURAÇÕES GERAIS
+# CONFIGURAÇÕES GERAIS E TABELA UNIFORME
 # =========================================================================
 WIDTH = 64
 HEIGHT = 64
@@ -16,15 +16,29 @@ BLOCO = 3
 GRID_X = 5
 GRID_Y = 5
 TAM_REGIAO = 3 * BLOCO
-BINS = 256
-TAMANHO_VETOR = GRID_X * GRID_Y * BINS
+BINS = 59 # Reduzido de 256 para 59 padrões uniformes
+TAMANHO_VETOR = GRID_X * GRID_Y * BINS # Agora é 1475 em vez de 6400
 
-# os.path.join resolve as barras invertidas (\) ou normais (/) automaticamente.
 pasta_processadas = 'imagens_processadas'
-caminho_esp32 = os.path.join('esp-main', 'banco_rostos.h') # Assume que a pasta esp-main tá no mesmo diretório do projeto
+caminho_esp32 = os.path.join('esp-main', 'banco_rostos.h') 
 
 if not os.path.exists(pasta_processadas):
     os.makedirs(pasta_processadas)
+
+# Tabela de tradução de 256 padrões para 59 padrões uniformes
+def _tabela_uniforme():
+    def trans(c):
+        b = [(c >> i) & 1 for i in range(8)]
+        return sum(b[i] != b[(i + 1) % 8] for i in range(8))
+    tab = np.full(256, 58, dtype=np.uint8)
+    k = 0
+    for c in range(256):
+        if trans(c) <= 2:
+            tab[c] = k
+            k += 1
+    return tab
+
+TAB59 = _tabela_uniforme()
 
 # =========================================================================
 # FUNÇÕES MATEMÁTICAS (Tan & Triggs + LBP)
@@ -47,7 +61,7 @@ def aplicar_tan_triggs(imagem_cortada):
 def extrair_nome(caminho_arquivo):
     nome_base = os.path.basename(caminho_arquivo)
     nome_base = os.path.splitext(nome_base)[0]
-    nome_base = re.sub(r'_\d+$', '', nome_base) # Tira o _1, _2 do final
+    nome_base = re.sub(r'_\d+$', '', nome_base)
     nome_base = re.split(r'_202', nome_base)[0]
     nome_base = re.sub(r'\d+', '', nome_base)
     return nome_base.lower()
@@ -72,7 +86,8 @@ def extrair_lbph(img_gray):
                 nx, ny = x + dx[i]*BLOCO, y + dy[i]*BLOCO
                 if soma_bloco(integral, nx, ny, BLOCO) >= soma_centro:
                     codigo |= (1 << i)
-            resultado[y + TAM_REGIAO//2, x + TAM_REGIAO//2] = codigo
+            # Converte o código direto pela tabela
+            resultado[y + TAM_REGIAO//2, x + TAM_REGIAO//2] = TAB59[codigo]
 
     vetor_lbph = np.zeros(TAMANHO_VETOR, dtype=np.float64)
     w_bloco, h_bloco = WIDTH // GRID_X, HEIGHT // GRID_Y
@@ -85,8 +100,16 @@ def extrair_lbph(img_gray):
             y_fim = HEIGHT if gy == GRID_Y - 1 else (gy + 1) * h_bloco
             
             bloco_recorte = resultado[y_inicio:y_fim, x_inicio:x_fim]
-            hist, _ = np.histogram(bloco_recorte, bins=256, range=(0, 256))
-            vetor_lbph[offset : offset + BINS] = hist
+            hist, _ = np.histogram(bloco_recorte, bins=BINS, range=(0, BINS))
+            
+            # Normalização (L1)
+            soma = hist.sum()
+            if soma > 0:
+                hist_norm = hist.astype(np.float64) / soma
+            else:
+                hist_norm = hist.astype(np.float64)
+                
+            vetor_lbph[offset : offset + BINS] = hist_norm
             
     return vetor_lbph
 
@@ -102,8 +125,10 @@ if not nome_usuario:
     sys.exit()
 nome_usuario = nome_usuario.strip()
 
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+pasta_script = os.path.dirname(os.path.abspath(__file__))
+caminho_cascade = os.path.join(pasta_script, 'haarcascade_frontalface_default.xml')
 cap = cv2.VideoCapture(0)
+face_cascade = cv2.CascadeClassifier(caminho_cascade)
 
 print(f"\n[1/3] CAPTURANDO FOTOS PARA: {nome_usuario}")
 print("Pressione 'c' para tirar a foto (faça umas 5 ou 6). Pressione 'q' quando terminar.")
@@ -141,7 +166,7 @@ cap.release()
 cv2.destroyAllWindows()
 
 # =========================================================================
-# PARTE 2: GERAÇÃO DO BANCO (Automático após fechar a câmera)
+# PARTE 2: GERAÇÃO DO BANCO (Amostras individuais, sem médias)
 # =========================================================================
 print("\n[2/3] CALCULANDO MATRIZES LBP DE TODA A TURMA...")
 
@@ -164,43 +189,58 @@ for arquivo in arquivos:
     agrupamento_pessoas[nome].append(vetor)
 
 # =========================================================================
-# PARTE 3: CRIANDO O .H
+# PARTE 3: CRIANDO O .H (Agora com lookup table e todos os vetores)
 # =========================================================================
 print(f"\n[3/3] GERANDO ARQUIVO C++ EM: {caminho_esp32}")
 
 try:
+    todas_amostras = []
+    labels_amostras = []
+    nomes = list(agrupamento_pessoas.keys())
+
+    for id_pessoa, nome in enumerate(nomes):
+        for vetor in agrupamento_pessoas[nome]:
+            todas_amostras.append(vetor)
+            labels_amostras.append(id_pessoa)
+
     with open(caminho_esp32, "w") as f:
         f.write("#ifndef BANCO_ROSTOS_H\n#define BANCO_ROSTOS_H\n\n#include <Arduino.h>\n\n")
-        f.write(f"const int NUM_ROSTOS = {len(agrupamento_pessoas)};\n\n")
+        f.write(f"const int NUM_PESSOAS = {len(nomes)};\n")
+        f.write(f"const int NUM_AMOSTRAS = {len(todas_amostras)};\n\n")
         
-        nomes = list(agrupamento_pessoas.keys())
+        # Injeta a tabela de conversão direto no C++
+        f.write("const uint8_t TAB59[256] = {\n    ")
+        f.write(", ".join(map(str, TAB59)))
+        f.write("\n};\n\n")
+
         f.write("const char nomes_rostos[][256] = {\n")
         for i, nome in enumerate(nomes):
             f.write(f'    "{nome}"' + (",\n" if i < len(nomes)-1 else "\n"))
         f.write("};\n\n")
         
-        f.write("const double banco_rostos[][6400] = {\n")
-        for i, nome in enumerate(nomes):
-            centroide = np.mean(agrupamento_pessoas[nome], axis=0)
+        f.write("const int labels_rostos[] = {\n    ")
+        f.write(", ".join(map(str, labels_amostras)))
+        f.write("\n};\n\n")
+        
+        f.write("const double banco_rostos[][1475] = {\n")
+        for i, amostra in enumerate(todas_amostras):
             f.write("    {\n        ")
-            valores_str = [f"{val:.1f}" for val in centroide]
+            # Salva com 4 casas decimais para capturar a fração da normalização
+            valores_str = [f"{val:.4f}" for val in amostra]
             for j in range(0, len(valores_str), 20):
                 linha_valores = ", ".join(valores_str[j:j+20])
                 if j + 20 >= len(valores_str):
                     f.write(linha_valores)
                 else:
                     f.write(linha_valores + ",\n        ")
-            f.write("\n    }" + (",\n" if i < len(nomes)-1 else "\n"))
+            f.write("\n    }" + (",\n" if i < len(todas_amostras)-1 else "\n"))
         f.write("};\n\n#endif\n")
         
     print("\n" + "="*50)
     print("(!) CADASTRO E BANCO DE DADOS CONCLUIDOS!")
-    print(f"Total de pessoas na base: {len(agrupamento_pessoas)}")
+    print(f"Total de pessoas na base: {len(nomes)}")
+    print(f"Total de fotos salvas: {len(todas_amostras)}")
     print("="*50)
-    print("-> PROXIMO PASSO:")
-    print("1. Abra a Arduino IDE e clique em 'Carregar' (Upload).")
-    print("2. Rode o arquivo 'cam.py' para testar.")
 
 except Exception as e:
     print(f"ERRO ao tentar salvar na pasta 'esp-main': {e}")
-    print("Verifique se a pasta 'esp-main' está no mesmo lugar que este script.")

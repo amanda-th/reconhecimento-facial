@@ -31,7 +31,7 @@ def aplicar_tan_triggs(imagem_cortada):
 # =========================================================================
 
 # No linux SERIAL_PORT = '/dev/ttyUSB0' ou /dev/ttyACM0, dependendo da placa
-SERIAL_PORT = 'COM7' 
+SERIAL_PORT = '/dev/ttyUSB1' 
 BAUD_RATE = 115200
 WIDTH = 64
 HEIGHT = 64
@@ -140,8 +140,11 @@ thread_esp.start()
 # =========================================================================
 # THREAD PRINCIPAL: Rastreamento e HUD
 # =========================================================================
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+# Acha a pasta exata onde este script está rodando
+pasta_script = os.path.dirname(os.path.abspath(__file__))
+caminho_cascade = os.path.join(pasta_script, 'haarcascade_frontalface_default.xml')
 cap = cv2.VideoCapture(0)
+face_cascade = cv2.CascadeClassifier(caminho_cascade)
 
 print("Sistema de Segurança Iniciado. Pressione 'q' para sair.")
 tempo_anterior = time.time()
