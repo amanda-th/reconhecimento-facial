@@ -78,6 +78,9 @@ void setup() {
     tranca.write(0);
     delay(500); // Apenas no boot é aceitável
     tranca.detach();
+
+    pinMode(PINO_SERVO, OUTPUT); 
+    digitalWrite(PINO_SERVO, LOW);
     
     digitalWrite(PINO_LED_VERDE, LOW);
     digitalWrite(PINO_LED_VERMELHO, HIGH); 
@@ -121,9 +124,13 @@ void loop() {
             break;
             
         case MOVENDO_PARA_ABRIR:
-            // Aguarda o tempo mecânico do motor sem travar o processador
             if (millis() - tempoInicioMovimento >= TEMPO_MOVIMENTO_SERVO) {
                 tranca.detach();
+                
+                // Força o pino para zero volts (Mata o ruído de RF da antena)
+                pinMode(PINO_SERVO, OUTPUT); 
+                digitalWrite(PINO_SERVO, LOW); 
+                
                 estadoAtual = ABERTA;
                 tempoAbertura = millis();
                 Serial.println("Porta fisicamente aberta.");
@@ -146,9 +153,14 @@ void loop() {
         case MOVENDO_PARA_FECHAR:
             if (millis() - tempoInicioMovimento >= TEMPO_MOVIMENTO_SERVO) {
                 tranca.detach();
+                
+                // Força o pino para zero volts (Mata o ruído de RF da antena)
+                pinMode(PINO_SERVO, OUTPUT); 
+                digitalWrite(PINO_SERVO, LOW); 
+                
                 estadoAtual = TRANCADA;
                 tempoUltimoFechamento = millis();
-                solicitarAbertura = false; // Limpa lixo residual de pacotes
+                solicitarAbertura = false; 
                 Serial.println("Porta fisicamente trancada. Cooldown ativado.");
             }
             break;
