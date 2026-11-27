@@ -40,11 +40,11 @@ O projeto uniu duas disciplinas: Processamento de Imagens (filtros, extração d
 
 ## 2. Objetivos
 
-* Reconhecer rostos de forma que o resultado seja repetível e razoavelmente estável diante de mudanças de iluminação, sem depender de bibliotecas de IA prontas.
-* Executar a parte pesada do reconhecimento (extração de características e classificação) na ESP32.
-* Transmitir o resultado entre as placas sem depender de roteador Wi-Fi.
-* Acionar uma tranca física de forma previsível, sem tremores no servo e sem reinicializações por queda de tensão.
-* Manter um registro das tentativas de acesso.
+- Reconhecer rostos de forma que o resultado seja repetível e razoavelmente estável diante de mudanças de iluminação, sem depender de bibliotecas de IA prontas.
+- Executar a parte pesada do reconhecimento (extração de características e classificação) na ESP32.
+- Transmitir o resultado entre as placas sem depender de roteador Wi-Fi.
+- Acionar uma tranca física de forma previsível, sem tremores no servo e sem reinicializações por queda de tensão.
+- Manter um registro das tentativas de acesso.
 
 ## 3. Visão geral da arquitetura
 
@@ -63,7 +63,7 @@ O sistema tem três blocos:
 
 1. **PC (Python).** Atua como o "olho" do sistema. Captura o vídeo, localiza o rosto com Haar Cascade, recorta, redimensiona para 64x64, aplica o filtro de Tan & Triggs e envia os 4096 bytes da imagem pela porta Serial. Também desenha a interface (HUD) e grava o log de acessos.
 2. **ESP32 Principal (C++).** Recebe a imagem, calcula o MB-LBP e o histograma, compara com os centroides gravados em `banco_rostos.h` usando distância euclidiana e envia o veredito (um `bool`) por ESP-NOW. Também devolve ao PC uma linha de texto com o nome e a distância, que é usada na interface.
-3. **ESP32 Atuadora (C++).** Fica na maquete da porta. Recebe os pacotes, decide quando abrir e fechar a tranca e controla os LEDs.
+3. **ESP32 Atuadora (C++).** Fica na maquete da porta. Recebe os pacotes, decide quando abrir e fechar a tranca e controla os LEDs através de uma Máquina de Estados não-bloqueante.
 
 Esse arranjo segue a ideia de computação de borda: o PC é só um nó de aquisição e a decisão de segurança acontece no hardware que de fato aciona a tranca.
 
@@ -87,9 +87,7 @@ Esse arranjo segue a ideia de computação de borda: o PC é só um nó de aquis
 
 **Comunicação por ESP-NOW.** As placas conversam direto pelo endereço MAC, sem passar por roteador, o que elimina a variação de atraso de uma rede Wi-Fi comum. O pacote enviado é uma estrutura de um único `bool`.
 
-**Máquina de estados na atuadora.** O comportamento da porta é descrito por estados (trancada, aberta, em cooldown) e controlado pelo relógio do sistema (`millis()`), não por esperas longas. O tempo de porta aberta (5 s) e o cooldown (1,5 s) são medidos dessa forma.
-
-**Debounce e cooldown.** O debounce exige 3 pacotes "reconhecido" consecutivos antes de abrir a porta. O cooldown deixa o atuador ignorando a câmera por 1,5 s depois de fechar. Os dois mecanismos existem por causa de problemas reais, descritos na linha do tempo.
+**Máquina de estados não-bloqueante na atuadora.** O acionamento mecânico foi arquitetado como uma FSM (*Finite State Machine*) orientada a eventos. O callback do rádio atua estritamente sinalizando flags. O `loop()` monitora essas flags e gerencia o tempo de porta aberta (5s) e de cooldown (1,5s) de forma assíncrona usando `millis()`. Com isso, a espera física do servo não exige comandos `delay()`, garantindo que o processador nunca bloqueie e o rádio Wi-Fi nunca perca pacotes de reconhecimento durante o giro do motor.
 
 ## 5. Desenvolvimento: linha do tempo do projeto
 
@@ -99,59 +97,45 @@ O sistema não saiu pronto. Foram cinco fases, cada uma motivada por um problema
 
 **Arquivos:** `gerar_rosto.py`, `gerar_banco.py`
 
-A primeira ideia foi a mais direta: capturar o rosto no PC, aplicar a convolução de Sobel (matrizes Gx e Gy, implementadas à mão para ficarem idênticas à versão em C++), redimensionar para 64x64 e enviar a matriz para a ESP32 comparar pixel a pixel com rostos guardados. O `gerar_rosto.py` gera um único rosto de referência (`matriz_rosto.txt`) e o `gerar_banco.py` evoluiu isso para um banco com vários rostos, escrito em `banco_rostos.h` como matrizes `uint8_t` de 64x64.
+A primeira ideia foi a mais direta: capturar o rosto no PC, aplicar a convolução de Sobel, redimensionar para 64x64 e enviar a matriz para a ESP32 comparar pixel a pixel com rostos guardados. O `gerar_rosto.py` gera um único rosto de referência e o `gerar_banco.py` evoluiu isso para um banco com vários rostos.
 
-**Resultado.** Não funcionou bem. O mapa de bordas muda muito com a iluminação da sala e com qualquer pequena rotação do rosto, então a comparação direta de pixels gerava falsos positivos e falsos negativos o tempo todo. Além disso, essa versão usava a imagem inteira da câmera redimensionada, sem localizar o rosto antes, o que piorava ainda mais a variação entre capturas.
+**Resultado.** Não funcionou bem. O mapa de bordas muda muito com a iluminação da sala e com qualquer pequena rotação do rosto, então a comparação direta de pixels gerava falsos positivos e falsos negativos o tempo todo.
 
 ### Fase 2: Tan & Triggs e MB-LBP
 
 **Arquivos:** `capturar_minhas_fotos.py`, `gerar_banco_turma.py`, `processar_banco_antigo.py`
 
-A mudança de abordagem foi parar de comparar pixels e passar a comparar características. O Python ficou com a tarefa de estabilizar a imagem (localizar o rosto com Haar Cascade, recortar e aplicar Tan & Triggs), e a ESP32 passou a calcular o MB-LBP e os histogramas.
+A mudança de abordagem foi parar de comparar pixels e passar a comparar características. O Python ficou com a tarefa de estabilizar a imagem, e a ESP32 passou a calcular o MB-LBP e os histogramas. Um detalhe de projeto importante: o banco de rostos é gerado offline pelo Python, mas o código que extrai o MB-LBP em Python (`extrair_lbph()`) reproduz exatamente a lógica do C++, usando imagem integral. 
 
-Um detalhe de projeto importante: o banco de rostos é gerado offline pelo Python, mas o código que extrai o MB-LBP em Python (`extrair_lbph()`) reproduz exatamente a lógica do C++, incluindo a mesma soma por imagem integral. Se os dois lados calculassem coisas diferentes, os vetores não seriam comparáveis.
-
-O segundo desafio foi o banco de dados. A turma já tinha um conjunto de fotos antigas, em `.bmp` e com tamanhos variados. O `processar_banco_antigo.py` varre a pasta `imagens/`, detecta o rosto em cada arquivo, recorta, aplica Tan & Triggs e salva o resultado em `imagens_processadas/`. Depois, o `gerar_banco_turma.py` lê essa pasta, agrupa as fotos por pessoa (o nome é extraído do nome do arquivo), calcula o centroide de cada uma e escreve o `banco_rostos.h`. O `capturar_minhas_fotos.py` serve para cadastrar novas pessoas pela webcam.
-
-Funcionava, mas o fluxo era manual: eram três scripts diferentes, rodados em ordem, e o `gerar_banco_turma.py` tinha o caminho da pasta da ESP32 fixo no código (um caminho de Windows específico da minha máquina).
+O segundo desafio foi o banco de dados. A turma já tinha um conjunto de fotos antigas que precisou ser processado em lote pelo script `processar_banco_antigo.py`.
 
 ### Fase 3: Unificação do fluxo de cadastro
 
 **Arquivo final:** `cadastrar_pessoa.py`
 
-Para não precisar rodar vários scripts toda vez que alguém novo fosse cadastrado, juntei tudo em um só. O script abre uma janela (`tkinter`) pedindo o nome, captura as fotos pela webcam (tecla `c`), e ao encerrar (tecla `q`) recalcula o banco inteiro a partir de `imagens_processadas/` e escreve o `banco_rostos.h` direto em `esp-main/`. O caminho é montado com `os.path.join`, então funciona igual no Windows e no Linux.
+Para não precisar rodar vários scripts, juntei o fluxo de cadastro e processamento. O script abre uma janela pedindo o nome, captura as fotos pela webcam, recalcula o banco inteiro a partir da pasta e escreve o `banco_rostos.h` direto no diretório da ESP32. O caminho de compilação foi automatizado independentemente do Sistema Operacional.
 
-Aproveitei para corrigir um problema de nomes: como as fotos novas são salvas como `nome_1.jpg`, `nome_2.jpg`, a função `extrair_nome()` precisou passar a remover esse sufixo `_N`, senão a mesma pessoa poderia ser tratada como identidades diferentes.
-
-Depois de gerar o banco é preciso regravar a ESP32 Principal, porque o banco fica compilado dentro do firmware.
-
-### Fase 4: Problemas físicos (jitter, brownout e Wi-Fi)
+### Fase 4: Desafios de integração hardware-software (Jitter, Brownout e EMI)
 
 **Arquivo final:** `esp-secundaria.ino`
 
-Com o reconhecimento funcionando, a atenção passou para o lado físico. A montagem é simples, mas rodar o sistema de forma contínua expôs três problemas que eu não tinha visto nos testes isolados de cada placa:
+Com o reconhecimento estável, a rodagem contínua do sistema expôs fenômenos físicos de campo:
 
-1. **Servo tremendo (jitter).** Enquanto o rosto estivesse em quadro e o resultado fosse "negado", a câmera mandava um pacote para cada frame processado. A atuadora recebia dezenas de comandos de "trancar" por segundo e o servo ficava tremendo.
-2. **Reinicializações (brownout).** O arranque do motor consome bastante corrente. Alimentando o servo pelo 3V3, a tensão caía e o detector de brownout da ESP32 reiniciava a placa.
-3. **Interferência entre rádio e PWM.** Com o servo energizado e o ESP-NOW ativo, o servo dava movimentos espúrios mesmo parado. Minha hipótese, baseada no comportamento observado, é que a atividade do rádio interferia na geração do sinal PWM do servo.
+1. **Jitter mecânico por EMI (Interferência Eletromagnética):** Mesmo com o motor parado e após o comando de `detach()`, o servo apresentava espasmos aleatórios. **Causa:** O pino de sinal, em estado de alta impedância (flutuando), atuava como uma antena de rádio e captava o ruído de RF das rajadas do ESP-NOW.
+2. **Brownout (Queda de Tensão):** O arranque mecânico exigia um pico de corrente abrupto (*inrush current*), derrubando a tensão da placa e disparando reinicializações de proteção.
 
-**Correções aplicadas:**
-
-* O servo passou a ser alimentado pelo pino VIN/5V.
-* Criei a flag `servoJaEstaNoZero`, para a atuadora mandar o comando de trancar uma única vez, e não a cada pacote "negado".
+**Correções híbridas aplicadas:**
+- O servo passou a ser alimentado direto pela linha de 5V (VIN), separando-o do regulador de 3.3V.
+- **Aterramento Lógico (Software):** Logo após desligar o PWM (`detach()`), o pino de controle foi forçado como `OUTPUT` e `LOW`. Esse aterramento de sinal silenciou a interferência de rádio.
+- **Filtro de Desacoplamento (Hardware):** A tensão elétrica foi blindada implementando um banco em paralelo de **3 capacitores eletrolíticos de 100 µF** nas trilhas de alimentação, formando um reservatório equivalente de 300 µF. Esse banco forneceu a energia rápida necessária para o tranco do motor, achatando a curva de queda de tensão ($\Delta V$) na linha principal.
 
 ### Fase 5: Sincronia entre tela e porta, e condições de corrida
 
 **Arquivos finais:** `cam.py`, `esp-secundaria.ino`
 
-Depois de estabilizar o motor, apareceu outro problema: a tela do computador mudava para "liberado" ou "negado" instantaneamente, mas a porta física leva tempo para abrir e a pessoa precisa passar. A interface e o mundo físico estavam em tempos diferentes.
-
-Soluções adotadas:
-
-1. **Debounce.** A atuadora só abre depois de receber 3 pacotes "reconhecido" consecutivos (`FOTOS_NECESSARIAS`). Um único frame bom no meio de ruído não abre a porta. O `cam.py` aplica a mesma regra de 3 confirmações para mostrar "AUTORIZADO".
-2. **Memória de estado.** A porta fica aberta por 5 s (`TEMPO_PERMANENCIA`). O `cam.py` guarda o instante da liberação e mantém a tela em verde durante esses 5 s, ficando em sincronia com a porta.
-3. **Cooldown.** Depois que a porta fecha, a atuadora ignora a câmera por 1,5 s (`TEMPO_COOLDOWN`). Sem isso, se alguém cobrisse o rosto no instante exato em que a porta estava fechando, chegava um comando de "negado" no meio do movimento do servo, e os dois comandos entravam em conflito (uma condição de corrida entre o fechamento por tempo e o comando vindo do rádio).
-4. **Auditoria.** Acrescentei uma miniatura (Picture-in-Picture) mostrando a imagem que a ESP32 recebe e um registro em CSV das tentativas, com intervalo mínimo de 3 s entre registros para não encher o arquivo.
+A interface e o mundo físico operavam em tempos diferentes. Soluções adotadas na FSM:
+1. **Debounce:** A atuadora só abre depois de receber 3 pacotes "reconhecido" consecutivos, mitigando eventuais ruídos visuais da câmera.
+2. **Memória de estado e Cooldown:** O sistema respeita o tempo da engrenagem. Após o fechamento, ignora a câmera por 1,5s. Sem esse *cooldown*, uma mudança súbita de identificação colidiria logicamente com as funções motoras, criando uma condição de corrida destrutiva.
 
 ## 6. Hardware e esquema elétrico
 
@@ -161,120 +145,94 @@ Conectada ao PC por USB, usada para a comunicação Serial. Não precisa de fia�
 
 ### 6.2 ESP32 Secundária (atuador)
 
-O servomotor deve ser alimentado pelo pino **VIN/5V**. Ligar o servo no 3V3 provoca queda de tensão e reinicialização da placa (ver Fase 4).
+O servomotor e a estabilização elétrica são montados na mesma barramento da protoboard.
 
 | Componente | Pino da ESP32 (GPIO) | Conexão |
 | ----- | ----- | ----- |
 | Servomotor (sinal) | 18 | Fio de sinal (amarelo/laranja) |
 | LED verde | 19 | Perna longa (+), com resistor |
 | LED vermelho | 21 | Perna longa (+), com resistor |
-| GND comum | GND | Fio marrom/preto do servo e perna (-) dos LEDs |
-| Alimentação do servo | VIN ou 5V | Fio vermelho do servo |
+| GND comum | GND | Fio do servo, perna (-) dos LEDs e perna curta (-) dos capacitores |
+| Alimentação do servo | VIN / 5V | Fio vermelho do servo e perna longa (+) dos capacitores |
+| Banco de Filtro | Paralelo ao 5V e GND | 3x Capacitores eletrolíticos de 100 µF |
 
 Os LEDs precisam de resistores de 220 Ω ou 330 Ω em série.
 
 ### 6.3 Consumo de memória do banco
 
-Cada pessoa cadastrada ocupa 6400 valores `double`, ou seja, 6400 x 8 = 51.200 bytes (cerca de 50 KB) na Flash. Por isso o firmware principal precisa ser gravado com a partição **Huge APP**. Esse também é o limite prático de quantas pessoas cabem no banco.
+Cada pessoa cadastrada ocupa 6400 valores `double` (cerca de 50 KB) na Flash. Por isso o firmware principal precisa ser gravado com a partição **Huge APP**.
 
 ## 7. Estrutura do repositório
 
 | Arquivo | Função | Situação |
 | ----- | ----- | ----- |
 | `esp-main.ino` | Firmware da ESP32 Principal (MB-LBP, distância, ESP-NOW) | Atual |
-| `esp-secundaria.ino` | Firmware da ESP32 Atuadora (servo, LEDs, estados) | Atual |
+| `esp-secundaria.ino` | Firmware da ESP32 Atuadora (servo, LEDs, FSM, debounce) | Atual |
 | `cam.py` | Reconhecimento em tempo real, HUD, PiP e log CSV | Atual |
 | `cadastrar_pessoa.py` | Captura de fotos e geração do `banco_rostos.h` | Atual |
-| `capturar_minhas_fotos.py` | Captura de fotos (cadastro em etapa separada) | Fase 2, substituído |
-| `processar_banco_antigo.py` | Processamento em lote das fotos antigas da turma | Fase 2, ainda útil para importar fotos antigas |
-| `gerar_banco_turma.py` | Geração do banco a partir de `imagens_processadas/` | Fase 2, substituído |
-| `gerar_rosto.py` | Rosto de referência com Sobel | Fase 1, obsoleto |
-| `gerar_banco.py` | Banco de rostos com Sobel | Fase 1, obsoleto |
+| `capturar_minhas_fotos.py` | Captura de fotos (cadastro em etapa separada) | Fase 2 |
+| `processar_banco_antigo.py` | Processamento em lote das fotos antigas da turma | Fase 2 |
+| `gerar_banco_turma.py` | Geração do banco a partir de `imagens_processadas/` | Fase 2 |
 
-As pastas `imagens/` (fotos originais) e `imagens_processadas/` (rostos 64x64 já tratados) são usadas pelos scripts de cadastro.
+**Nota de Privacidade:** As pastas `imagens/` e `imagens_processadas/` (que contém as capturas biométricas da turma) foram isoladas no arquivo `.gitignore` e removidas por via de reescrita da árvore histórica de commits para proteger o banco de dados pessoal, sendo mantidas estritamente no armazenamento local.
 
 ## 8. Como reproduzir o projeto
 
 ### 8.1 Pré-requisitos
 
-* Arduino IDE com suporte a placas ESP32.
-* Biblioteca `ESP32Servo` (instalar pelo Gerenciador de Bibliotecas).
-* Python 3 com `opencv-python`, `pyserial` e `numpy`.
+- Arduino IDE com suporte a placas ESP32.
+- Biblioteca `ESP32Servo` (instalar pelo Gerenciador de Bibliotecas).
+- Python 3 com `opencv-python`, `pyserial` e `numpy`.
 
 **Linux (Ubuntu / Linux Mint):**
-
 ```bash
 sudo apt update
-sudo apt install python3 python3-pip python3-tk
-pip3 install opencv-python pyserial numpy
+sudo apt install python3 python3-pip python3-tk python3-opencv python3-serial
+pip3 install numpy
 ```
 
-O pacote `python3-tk` é necessário para a janela de cadastro.
-
-**Windows:** com o Python 3 instalado (marcando "Add to PATH"):
-
+**Windows:** (marcando "Add to PATH"):
 ```cmd
 pip install opencv-python pyserial numpy
 ```
 
 ### 8.2 Gravando as placas
 
-1. Conecte a **ESP32 Atuadora** e grave o `esp-secundaria.ino`. Se a placa não entrar em modo de gravação sozinha, segure o botão `BOOT` durante o início do upload.
+1. Conecte a **ESP32 Atuadora** e grave o `esp-secundaria.ino`.
 2. Desconecte a atuadora e conecte a **ESP32 Principal**.
-3. No `esp-main.ino`, confira se o vetor `macESP2` contém o endereço MAC da placa atuadora. Esse endereço é diferente para cada placa. Uma forma de descobri-lo é gravar um sketch simples que imprima `WiFi.macAddress()` na Serial.
-4. Grave o `esp-main.ino` com a partição **Huge APP**.
-5. Feche o Monitor Serial da Arduino IDE, para liberar a porta para o Python.
+3. No `esp-main.ino`, atualize a variável `macESP2` com o MAC Address correto da placa atuadora.
+4. Grave o `esp-main.ino` utilizando a aba Tools > Partition Scheme > **Huge APP**.
+5. Feche o Monitor Serial para liberar a porta para o script Python.
 
 ### 8.3 Cadastrando pessoas
 
 ```bash
 python3 cadastrar_pessoa.py
 ```
-
-1. Digite o nome (sem espaços) na janela que abrir.
-2. Pressione `c` para tirar cada foto. Vale tirar de 5 a 10, variando levemente o ângulo e a expressão.
-3. Pressione `q` para encerrar. O script recalcula o banco de todas as pessoas e atualiza `esp-main/banco_rostos.h`.
-4. **Regrave a ESP32 Principal.** O banco é compilado junto com o firmware, então qualquer cadastro novo exige um novo upload.
-
-Para importar fotos antigas de um grupo de pessoas, coloque-as em `imagens/` com nomes no formato `nome_...` e rode `processar_banco_antigo.py` antes do cadastro.
+Pressione `c` para capturar as fotos e `q` para salvar. **Regrave a ESP32 Principal** após a geração automática do `banco_rostos.h`. O XML de reconhecimento do Haar Cascade deve estar na mesma raiz do script de execução.
 
 ### 8.4 Executando o reconhecimento
 
 Ajuste a variável `SERIAL_PORT` no `cam.py`:
-
-* Windows: `COM7` (ou a porta correspondente)
-* Linux: `/dev/ttyUSB0` ou `/dev/ttyACM0`
-
-No Linux, libere o acesso à porta antes de rodar:
-
-```bash
-sudo chmod a+rw /dev/ttyUSB0
-```
-
-Depois:
+- Windows: `COM7` (ou a porta correspondente)
+- Linux: `/dev/ttyUSB0` ou `/dev/ttyACM0` (garanta permissão de I/O rodando `sudo chmod a+rw /dev/ttyUSB0`).
 
 ```bash
 python3 cam.py
 ```
 
-Para encerrar, pressione `q` na janela de vídeo.
-
 ## 9. Auditoria de acessos
 
-Cada tentativa de acesso é registrada em `relatorio_acessos.csv`, com as colunas `Data_Hora`, `Nome`, `Status` (LIBERADO ou BARRADO) e `Distancia_LBP`. Para evitar repetição, o `cam.py` grava no máximo um registro a cada 3 segundos, e não grava tentativas negadas enquanto a porta está aberta.
-
-A interface mostra a moldura do rosto colorida conforme o estado (laranja ao processar, verde quando autorizado, vermelho quando bloqueado), o nome e a distância calculada, a taxa de quadros e uma miniatura com a imagem 64x64 tratada, que é exatamente o que a ESP32 recebe.
+Cada tentativa de acesso é registrada em `relatorio_acessos.csv`, com as colunas `Data_Hora`, `Nome`, `Status` e `Distancia_LBP`. A interface mostra o *bounding box* dinâmico colorido conforme os estados da máquina (processando, autorizado, bloqueado), indicando via terminal o quadro de inferência reduzido para 64x64 recebido pelo microcontrolador.
 
 ## 10. Limitações conhecidas e trabalhos futuros
 
-Algumas coisas que reconheço como limitações do estado atual do projeto:
-
-* **Limiar fixo.** O valor de 100,0 foi ajustado empiricamente depois da troca de algoritmo e não passou por uma avaliação sistemática (taxas de falso positivo e falso negativo). Um próximo passo natural seria coletar um conjunto de teste e traçar essas curvas para escolher o limiar com critério.
-* **Sem detecção de vivacidade.** O sistema não distingue um rosto real de uma foto exibida na câmera. Para um uso real de segurança isso seria obrigatório.
-* **ESP-NOW sem criptografia.** O par é configurado com `encrypt = false`. Qualquer dispositivo que conheça o MAC da atuadora poderia, em tese, enviar pacotes de liberação.
-* **Latência não medida.** A comunicação por ESP-NOW é, em geral, de baixa latência, mas não fiz uma medição formal do tempo entre a captura da imagem e o acionamento da porta.
-* **Banco embutido no firmware.** Cada novo cadastro exige regravar a ESP32 Principal. Guardar o banco em um sistema de arquivos (SPIFFS/LittleFS) permitiria atualizá-lo sem recompilar.
-* **Somente o primeiro rosto.** Se houver mais de uma pessoa em quadro, apenas o primeiro rosto detectado é processado.
+- **Limiar fixo.** O valor de 100,0 foi ajustado empiricamente depois da troca de algoritmo e não passou por uma avaliação sistemática (taxas de falso positivo e falso negativo). Um próximo passo natural seria coletar um conjunto de teste e traçar essas curvas para escolher o limiar com critério.
+- **Sem detecção de vivacidade.** O sistema não distingue um rosto real de uma foto exibida na câmera. Para um uso real de segurança isso seria obrigatório.
+- **ESP-NOW sem criptografia.** O par é configurado com `encrypt = false`. Qualquer dispositivo que conheça o MAC da atuadora poderia, em tese, enviar pacotes de liberação.
+- **Latência não medida.** A comunicação por ESP-NOW é, em geral, de baixa latência, mas não fiz uma medição formal do tempo entre a captura da imagem e o acionamento da porta.
+- **Banco embutido no firmware.** Cada novo cadastro exige regravar a ESP32 Principal. Guardar o banco em um sistema de arquivos (SPIFFS/LittleFS) permitiria atualizá-lo sem recompilar.
+- **Somente o primeiro rosto.** Se houver mais de uma pessoa em quadro, apenas o primeiro rosto detectado é processado.
 
 ## 11. Considerações finais
 
