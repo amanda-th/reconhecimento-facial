@@ -32,7 +32,7 @@ uint8_t inputImage[HEIGHT][WIDTH];
 int integralImage[HEIGHT + 1][WIDTH + 1];
 uint8_t resultadoLBP[HEIGHT][WIDTH];
 int vetorLBPH[TAMANHO_VETOR];
-float vetorLBPH_norm[TAMANHO_VETOR]; // Novo vetor normalizado
+float vetorLBPH_norm[TAMANHO_VETOR];
 
 // MAC Address da segunda ESP32 (Atuador)
 uint8_t macESP2[] = {0x20, 0x9B, 0xA9, 0x8F, 0xFC, 0xE4}; 
@@ -61,11 +61,8 @@ double calcularDistanciaChi2Ponderada(float *vetorNovaFoto, const double *vetorA
         double b = vetorAmostra[i];
         
         if (a + b > 1e-9) {
-            // Descobre em qual das 25 células (0 a 24) estamos lendo agora
             int celulaAtual = i / BINS; 
             float peso = PESOS_REGIAO[celulaAtual];
-            
-            // Aplica o peso na diferença daquele histograma
             dist += peso * (((a - b) * (a - b)) / (a + b));
         }
     }
@@ -85,7 +82,7 @@ void receiveSerialTask(void *pvParameters) {
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(5)); 
+        vTaskDelay(pdMS_TO_TICKS(2)); 
     }
 }
 
@@ -100,11 +97,16 @@ void processImageTask(void *pvParameters) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+        // 0. Zera bordas da imagem integral antes de acumular
+        for (int x = 0; x <= WIDTH; x++) integralImage[0][x] = 0;
+        for (int y = 0; y <= HEIGHT; y++) integralImage[y][0] = 0;
+
         // 1. Criar Imagem Integral
         for (int y = 1; y <= HEIGHT; y++) {
             for (int x = 1; x <= WIDTH; x++) {
                 integralImage[y][x] = inputImage[y - 1][x - 1]
-                    + integralImage[y - 1][x] + integralImage[y][x - 1]
+                    + integralImage[y - 1][x]
+                    + integralImage[y][x - 1]
                     - integralImage[y - 1][x - 1];
             }
         }
@@ -122,19 +124,15 @@ void processImageTask(void *pvParameters) {
                         codigo |= (1 << i);
                     }
                 }
-                // Converte direto pela lookup table gerada pelo Python!
                 resultadoLBP[y + tamanhoRegiao/2][x + tamanhoRegiao/2] = TAB59[codigo];
             }
         }
-
-        vTaskDelay(pdMS_TO_TICKS(2));
 
         // 3. Calcular Histograma e Normalizar (L1)
         memset(vetorLBPH, 0, sizeof(vetorLBPH));
         int wBloco = WIDTH / GRID_X;
         int hBloco = HEIGHT / GRID_Y;
 
-        // Monta as contagens
         for (int gy = 0; gy < GRID_Y; gy++) {
             for (int gx = 0; gx < GRID_X; gx++) {
                 int offset = (gy * GRID_X + gx) * BINS;
@@ -147,7 +145,6 @@ void processImageTask(void *pvParameters) {
                     }
                 }
                 
-                // Normaliza a célula (divide tudo pela soma daquele quadrado)
                 float soma = 0;
                 for (int i = 0; i < BINS; i++) soma += vetorLBPH[offset + i];
                 for (int i = 0; i < BINS; i++) {
@@ -156,28 +153,24 @@ void processImageTask(void *pvParameters) {
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(2));
-
-        // 4. Classificação com Amostra Mais Próxima (Nearest Neighbor) e Qui-Quadrado Ponderado
+        // 4. Classificação com Amostra Mais Próxima e Qui-Quadrado Ponderado
         double menorDistancia = 9999999.0;
         int idIdentificado = 0; 
         
-        // Varre todas as fotos isoladas do banco
         for (int i = 0; i < NUM_AMOSTRAS; i++) {
             double distAtual = calcularDistanciaChi2Ponderada(vetorLBPH_norm, banco_rostos[i]);
             
             if (distAtual < menorDistancia) {
                 menorDistancia = distAtual;
-                // Busca a qual pessoa essa foto específica pertence
                 idIdentificado = labels_rostos[i]; 
             }
             
-            // Respiramos a cada 20 fotos comparadas
-            if (i % 20 == 0) vTaskDelay(pdMS_TO_TICKS(1));
+            if (i > 0 && i % 50 == 0) vTaskDelay(pdMS_TO_TICKS(1));
         }
 
-        // O limiar com Qui-Quadrado + Pesos fica ajustado para a mesma faixa de segurança rigorosa
-        double threshold = 7.5;
+        // Limiar base (EER) avaliado estatisticamente = 9.1 
+        // Margem operacional de ruído (iluminação/ausência de alinhamento ocular) = +3.5
+        double threshold = 12.6;
         bool ehOAluno = (menorDistancia <= threshold);
 
         // 5. ESP-NOW e Feedback
@@ -191,8 +184,7 @@ void processImageTask(void *pvParameters) {
                 Serial.printf("ACESSO NEGADO! (Parecido com %s, dist: %.2f)\n", nomes_rostos[idIdentificado], menorDistancia);
             }
         }
-        
-        Serial.println("OK"); 
+        Serial.println("OK");
     }
 }
 

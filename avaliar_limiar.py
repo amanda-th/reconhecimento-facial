@@ -35,6 +35,13 @@ GRID = 5
 DX = [0, 1, 2, 2, 2, 1, 0, 0]
 DY = [0, 0, 0, 1, 2, 2, 2, 1]
 
+# pesos por célula que o esp-main.ino usa hoje (PESOS_REGIAO)
+PESOS_FW = np.array([0.5, 1.0, 1.0, 1.0, 0.5,
+                     0.5, 2.0, 2.0, 2.0, 0.5,
+                     0.5, 2.0, 2.0, 2.0, 0.5,
+                     0.5, 1.5, 1.5, 1.5, 0.5,
+                     0.2, 0.5, 0.5, 0.5, 0.2])
+
 
 # ----------------------------------------------------------------------------
 # Leitura
@@ -50,14 +57,15 @@ def carregar(pasta):
     arqs = []
     for ext in ("jpg", "jpeg", "png", "bmp"):
         arqs += glob.glob(os.path.join(pasta, f"*.{ext}"))
-    imgs, nomes = [], []
+    imgs, nomes, caminhos = [], [], []
     for a in sorted(arqs):
         im = cv2.imread(a, cv2.IMREAD_GRAYSCALE)
         if im is None:
             continue
         imgs.append(cv2.resize(im, (W, H)))
         nomes.append(extrair_nome(a))
-    return imgs, nomes
+        caminhos.append(os.path.basename(a))
+    return imgs, nomes, caminhos
 
 
 # ----------------------------------------------------------------------------
@@ -136,19 +144,42 @@ VARIANTES = {
         dict(area="valida", bins=59, norm=True, cel="iguais", dist="chi2"),
     "E idem D com raiz (Hellinger), euclid":
         dict(area="valida", bins=59, norm=True, sqrt=True, cel="iguais", dist="euclid"),
+    "F C + pesos do firmware (chi2 ponderado)":
+        dict(area="completa", bins=59, norm=True, cel="firmware", dist="chi2", pesos="firmware"),
+    "G C + pesos aprendidos (impostor/legitimo)":
+        dict(area="completa", bins=59, norm=True, cel="firmware", dist="chi2", pesos="aprendidos"),
 }
 
 
 # ----------------------------------------------------------------------------
 # Distâncias e classificação
 # ----------------------------------------------------------------------------
-def dist_vec(p, G, metrica):
+def dist_vec(p, G, metrica, w=None):
     if metrica == "euclid":
         return np.sqrt(((G - p) ** 2).sum(1))
-    return (((G - p) ** 2) / (G + p + 1e-9)).sum(1)   # chi-quadrado
+    t = ((G - p) ** 2) / (G + p + 1e-9)               # chi-quadrado
+    return (t * w).sum(1) if w is not None else t.sum(1)
 
 
-def dist_classes(Fg, yg, nC, Fp, loo, clf, metrica):
+def aprender_pesos(F, y, nb):
+    """Peso da célula = dif. média entre pessoas / dif. média da mesma pessoa (média 1)."""
+    n, ncel = len(F), GRID * GRID
+    g_sum, g_n, i_sum, i_n = np.zeros(ncel), 0, np.zeros(ncel), 0
+    for k in range(n):
+        t = (((F - F[k]) ** 2) / (F + F[k] + 1e-9)).reshape(n, ncel, nb).sum(2)
+        mesma = (y == y[k])
+        mesma[k] = False
+        outra = (y != y[k])
+        g_sum += t[mesma].sum(0)
+        g_n += mesma.sum()
+        i_sum += t[outra].sum(0)
+        i_n += outra.sum()
+    w = (i_sum / max(i_n, 1)) / np.maximum(g_sum / max(g_n, 1), 1e-9)
+    w = np.clip(w / w.mean(), 0.2, 3.0)
+    return w / w.mean()
+
+
+def dist_classes(Fg, yg, nC, Fp, loo, clf, metrica, w=None):
     """Distância de cada probe a cada pessoa. No modo loo, o probe é retirado da própria classe."""
     D = np.full((len(Fp), nC), np.inf)
     cont = np.bincount(yg, minlength=nC)
@@ -158,16 +189,16 @@ def dist_classes(Fg, yg, nC, Fp, loo, clf, metrica):
         np.add.at(S, yg, Fg)
         C = S / cont[:, None]
         for k in range(len(Fp)):
-            D[k] = dist_vec(Fp[k], C, metrica)
+            D[k] = dist_vec(Fp[k], C, metrica, w)
             if loo:
                 c = yg[k]
                 if cont[c] >= 2:
-                    D[k, c] = dist_vec(Fp[k], ((S[c] - Fg[k]) / (cont[c] - 1))[None], metrica)[0]
+                    D[k, c] = dist_vec(Fp[k], ((S[c] - Fg[k]) / (cont[c] - 1))[None], metrica, w)[0]
                 else:
                     D[k, c] = np.nan
     else:  # amostra mais próxima
         for k in range(len(Fp)):
-            d = dist_vec(Fp[k], Fg, metrica)
+            d = dist_vec(Fp[k], Fg, metrica, w)
             if loo:
                 d[k] = np.inf
             for c in range(nC):
@@ -177,7 +208,15 @@ def dist_classes(Fg, yg, nC, Fp, loo, clf, metrica):
     return D
 
 
-def pontuar(D, ci, loo):
+def _margem_ok(Dm, margem):
+    """O 2º colocado (outra PESSOA) precisa estar pelo menos `margem` (%) mais longe que o 1º."""
+    if margem <= 0 or Dm.shape[1] < 2:
+        return np.ones(len(Dm), bool)
+    s = np.sort(Dm, axis=1)
+    return s[:, 1] >= s[:, 0] * (1 + margem)
+
+
+def pontuar(D, ci, loo, margem=0.0):
     """ci = índice da classe verdadeira (-1 = pessoa fora do banco)."""
     m = len(D)
     ar = np.arange(m)
@@ -193,11 +232,12 @@ def pontuar(D, ci, loo):
         Dimp = Dn
         imp = ci < 0
     ok = pred == ci
-    s_g = np.where(ok, dmin, np.inf)[gen]          # aceito E com a identidade certa
-    s_i = Dimp.min(1)[imp]                          # menor distância de um impostor
+    s_g = np.where(ok & _margem_ok(Dn, margem), dmin, np.inf)[gen]   # aceito E identidade certa
+    s_i = np.where(_margem_ok(Dimp, margem), Dimp.min(1), np.inf)[imp]  # impostor que passaria
     return dict(s_g=s_g, s_i=s_i, rank1=ok[gen].mean() if gen.any() else np.nan,
                 imp_ident=Dimp.argmin(1)[imp], erro_ident=(pred[gen & ~ok], ci[gen & ~ok]),
-                gen_min=dmin[gen], gen_ok=ok[gen])
+                gen_min=dmin[gen], gen_ok=ok[gen],
+                pred_gen=pred[gen], ci_gen=ci[gen], idx_gen=np.where(gen)[0])
 
 
 def curvas(s_g, s_i):
@@ -241,7 +281,7 @@ def main():
     ap.add_argument("--saida", default=".")
     a = ap.parse_args()
 
-    imgs, nomes = carregar(a.pasta)
+    imgs, nomes, arqs = carregar(a.pasta)
     classes = sorted(set(nomes))
     if len(classes) < 2:
         raise SystemExit("Preciso de pelo menos 2 pessoas em " + a.pasta)
@@ -255,24 +295,32 @@ def main():
 
     cods = [codigos_mblbp(im) for im in imgs]
     if a.teste:
-        timgs, tnomes = carregar(a.teste)
+        timgs, tnomes, tarqs = carregar(a.teste)
         tcods = [codigos_mblbp(im) for im in timgs]
         yt = np.array([cidx.get(n, -1) for n in tnomes])
         desc = sorted(set(n for n in tnomes if n not in cidx))
         print(f"Teste externo: {len(timgs)} imagens; fora do banco (impostores): {desc or 'nenhuma'}\n")
 
-    resultados = {}
+    resultados, Dmats, pesos_apr = {}, {}, None
     for nome_v, cfg in VARIANTES.items():
         Fg = np.array([feature(c, cfg) for c in cods])
         Ft = np.array([feature(c, cfg) for c in tcods]) if a.teste else None
+        w, nb = None, cfg["bins"]
+        if cfg.get("pesos") == "firmware":
+            w = np.repeat(PESOS_FW, nb)
+        elif cfg.get("pesos") == "aprendidos":
+            pesos_apr = aprender_pesos(Fg, yg, nb)
+            w = np.repeat(pesos_apr, nb)
         for clf in ("centroide", "amostra"):
             r = {}
-            D = dist_classes(Fg, yg, nC, Fg, True, clf, cfg["dist"])
+            D = dist_classes(Fg, yg, nC, Fg, True, clf, cfg["dist"], w)
             r["loo"] = pontuar(D, yg, True)
+            Dt = None
             if a.teste:
-                Dt = dist_classes(Fg, yg, nC, Ft, False, clf, cfg["dist"])
+                Dt = dist_classes(Fg, yg, nC, Ft, False, clf, cfg["dist"], w)
                 r["ext"] = pontuar(Dt, yt, False)
             resultados[(nome_v, clf)] = r
+            Dmats[(nome_v, clf)] = (D, Dt)
 
     figs = {}
     for modo, titulo in (("loo", "LEAVE-ONE-OUT (fotos de cadastro; otimista)"),
@@ -286,7 +334,7 @@ def main():
         linhas = []
         for (nv, clf), r in resultados.items():
             s = r[modo]
-            if len(s["s_g"]) == 0 or len(s["s_i"]) == 0:
+            if len(s["s_g"]) == 0 or len(s["s_i"]) == 0 or not np.isfinite(s["s_g"]).any():
                 continue
             T, far, frr = curvas(s["s_g"], s["s_i"])
             i = np.argmin(np.abs(far - frr))
@@ -300,20 +348,64 @@ def main():
         print("  rank1 = acerto de identidade; EER = ponto em que FAR=FRR (menor é melhor);")
         print("  FRR@FAR1% = quantos usuários legítimos são barrados quando só 1% dos impostores entra.\n")
 
-    # --- imãs: quem "atrai" os impostores e os erros de identidade (variante A, centroide)
-    chave = (list(VARIANTES)[0], "centroide")
     modo = "ext" if a.teste else "loo"
-    s = resultados[chave][modo]
+    chave = (list(VARIANTES)[0], "centroide")
+    melhor = figs[modo][0]
+    chave_m = (melhor[1], melhor[2])
+    print(f"(tabelas/figura acima no modo: {modo.upper()})")
+    if pesos_apr is not None:
+        print("\nPESOS APRENDIDOS por célula (média 1; >1 = célula que separa bem pessoas):")
+        for linha in pesos_apr.reshape(GRID, GRID):
+            print("   " + "  ".join(f"{v:5.2f}" for v in linha))
+        print("  (aprendidos com as fotos do banco; no modo LOO há um vazamento pequeno => leve otimismo)\n")
+
+    # --- margem top1/top2 entre pessoas diferentes
     print("=" * 112)
-    print("IMAS (variante A atual): para quem os desconhecidos / erros apontam")
-    tot = Counter(s["imp_ident"])
-    for c, q in tot.most_common(4):
-        print(f"  impostor -> {classes[c]:12s} {q / len(s['imp_ident']):6.1%}")
-    pred_err, ver_err = s["erro_ident"]
-    if len(pred_err):
-        print("  erros de identidade (verdadeiro -> previsto):")
-        for (v, p), q in Counter(zip(ver_err, pred_err)).most_common(6):
-            print(f"    {classes[v]:12s} -> {classes[p]:12s} {q}x")
+    print(f"EFEITO DA MARGEM TOP1/TOP2 na melhor variante: {chave_m[0]} / {chave_m[1]}  [{modo.upper()}]")
+    print(f"{'margem':>8s} {'EER':>7s} {'FRR@FAR5%':>10s} {'FRR@FAR1%':>10s} {'T@FAR1%':>9s}")
+    D_m, Dt_m = Dmats[chave_m]
+    for m in (0.0, 0.05, 0.10, 0.20, 0.30):
+        sm = pontuar(D_m, yg, True, m) if modo == "loo" else pontuar(Dt_m, yt, False, m)
+        if not np.isfinite(sm["s_g"]).any():
+            print(f"{m:8.0%}   (ninguém passa)")
+            continue
+        T, far, frr = curvas(sm["s_g"], sm["s_i"])
+        i = np.argmin(np.abs(far - frr))
+        f5, _ = resumo(T, far, frr, 0.05)
+        f1, t1 = resumo(T, far, frr, 0.01)
+        print(f"{m:8.0%} {(far[i] + frr[i]) / 2:7.1%} {f5:10.1%} {f1:10.1%} {t1:9.3f}")
+    print("  margem 20% = o 2º colocado (outra pessoa) tem de estar >=20% mais longe que o 1º.\n")
+
+    # --- por pessoa + fotos suspeitas
+    s = resultados[chave_m][modo]
+    arq_probe = arqs if modo == "loo" else tarqs
+    print("=" * 112)
+    print(f"ACERTO DE IDENTIDADE POR PESSOA (melhor variante, {modo.upper()}) — procure Gustavo/Kauan aqui")
+    for c, n in enumerate(classes):
+        sel = s["ci_gen"] == c
+        if sel.any():
+            print(f"  {n:15s} {sel.sum():4d} amostras   rank1 {s['gen_ok'][sel].mean():6.1%}")
+    errados = np.where(~s["gen_ok"])[0]
+    if len(errados):
+        print(f"\n  {len(errados)} amostras identificadas como OUTRA pessoa (arquivo -> previsto); "
+              f"confira se o recorte é um rosto de verdade:")
+        for e in errados[:20]:
+            print(f"    {arq_probe[s['idx_gen'][e]]:32s} -> {classes[s['pred_gen'][e]]}")
+    print()
+
+    # --- imãs: quem "atrai" os impostores e os erros de identidade
+    for ch in (chave, chave_m):
+        s = resultados[ch][modo]
+        print("=" * 112)
+        print(f"IMAS ({ch[0]} / {ch[1]}): para quem os desconhecidos / erros apontam")
+        tot = Counter(s["imp_ident"])
+        for c, q in tot.most_common(4):
+            print(f"  impostor -> {classes[c]:12s} {q / len(s['imp_ident']):6.1%}")
+        pred_err, ver_err = s["erro_ident"]
+        if len(pred_err):
+            print("  erros de identidade (verdadeiro -> previsto):")
+            for (v, p), q in Counter(zip(ver_err, pred_err)).most_common(6):
+                print(f"    {classes[v]:12s} -> {classes[p]:12s} {q}x")
 
     Fa = np.array([feature(c, VARIANTES[chave[0]]) for c in cods])
     print("\nPESO de cada célula 5x5 na distância euclidiana atual (% do total; linha 5 = queixo/barba):")
@@ -353,6 +445,7 @@ def main():
         ax[2].hist(sc(s["s_i"]), bins=25, alpha=.45, color=f"C{k+2}", label=f"impostor {nv[:1]}")
     ax[2].set_title("Distribuição das distâncias (quanto menos sobrepostas, melhor)")
     ax[2].legend(fontsize=7)
+    fig.suptitle(f"Modo: {'TESTE EXTERNO' if modo_f == 'ext' else 'LEAVE-ONE-OUT (otimista)'}", fontsize=10)
     plt.tight_layout()
     out = os.path.join(a.saida, "curvas_limiar.png")
     fig.savefig(out, dpi=130)

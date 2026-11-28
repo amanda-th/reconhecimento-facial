@@ -27,14 +27,13 @@ unsigned long tempoUltimoFechamento = 0;
 
 const unsigned long TEMPO_PERMANENCIA = 5000;
 const unsigned long TEMPO_MOVIMENTO_SERVO = 500; 
-const unsigned long TEMPO_COOLDOWN = 1500;
+const unsigned long TEMPO_COOLDOWN = 3000;
 
-// Flags de comunicação entre o Callback (Wi-Fi) e o Loop (Física)
 volatile bool solicitarAbertura = false;
 volatile bool solicitarFechamento = false;
 
 int contadorReconhecimento = 0;
-const int FOTOS_NECESSARIAS = 3; 
+const int FOTOS_NECESSARIAS = 3; // exige 3 acertos seguidos
 
 typedef struct struct_mensagem {
     bool reconhecido;
@@ -50,11 +49,10 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
     
     if (estadoAtual == TRANCADA) {
         if (millis() - tempoUltimoFechamento > TEMPO_COOLDOWN) {
-            
             if (dadosRecebidos.reconhecido == true) {
                 contadorReconhecimento++;
                 if (contadorReconhecimento >= FOTOS_NECESSARIAS) {
-                    solicitarAbertura = true; // Levanta a bandeira, não roda motor aqui!
+                    solicitarAbertura = true;
                     contadorReconhecimento = 0; 
                 }
             } else {
@@ -76,7 +74,7 @@ void setup() {
     
     tranca.attach(PINO_SERVO);
     tranca.write(0);
-    delay(500); // Apenas no boot é aceitável
+    delay(500);
     tranca.detach();
 
     pinMode(PINO_SERVO, OUTPUT); 
@@ -98,18 +96,16 @@ void setup() {
 // LOOP PRINCIPAL (Máquina de Estados Não-Bloqueante)
 // =========================================================================
 void loop() {
-    
     switch (estadoAtual) {
-        
         case TRANCADA:
             if (solicitarAbertura) {
                 solicitarAbertura = false;
                 solicitarFechamento = false;
                 
-                tranca.attach(PINO_SERVO);
-                tranca.write(90);
                 digitalWrite(PINO_LED_VERDE, HIGH);
                 digitalWrite(PINO_LED_VERMELHO, LOW);
+                tranca.attach(PINO_SERVO);
+                tranca.write(90);
                 
                 estadoAtual = MOVENDO_PARA_ABRIR;
                 tempoInicioMovimento = millis();
@@ -117,7 +113,6 @@ void loop() {
             }
             else if (solicitarFechamento) {
                 solicitarFechamento = false;
-                // Motor já está em 0, só garante os LEDs
                 digitalWrite(PINO_LED_VERDE, LOW);
                 digitalWrite(PINO_LED_VERMELHO, HIGH);
             }
@@ -126,8 +121,6 @@ void loop() {
         case MOVENDO_PARA_ABRIR:
             if (millis() - tempoInicioMovimento >= TEMPO_MOVIMENTO_SERVO) {
                 tranca.detach();
-                
-                // Força o pino para zero volts (Mata o ruído de RF da antena)
                 pinMode(PINO_SERVO, OUTPUT); 
                 digitalWrite(PINO_SERVO, LOW); 
                 
@@ -139,10 +132,10 @@ void loop() {
             
         case ABERTA:
             if (millis() - tempoAbertura >= TEMPO_PERMANENCIA) {
-                tranca.attach(PINO_SERVO);
-                tranca.write(0);
                 digitalWrite(PINO_LED_VERDE, LOW);
                 digitalWrite(PINO_LED_VERMELHO, HIGH);
+                tranca.attach(PINO_SERVO);
+                tranca.write(0);
                 
                 estadoAtual = MOVENDO_PARA_FECHAR;
                 tempoInicioMovimento = millis();
@@ -153,8 +146,6 @@ void loop() {
         case MOVENDO_PARA_FECHAR:
             if (millis() - tempoInicioMovimento >= TEMPO_MOVIMENTO_SERVO) {
                 tranca.detach();
-                
-                // Força o pino para zero volts (Mata o ruído de RF da antena)
                 pinMode(PINO_SERVO, OUTPUT); 
                 digitalWrite(PINO_SERVO, LOW); 
                 
@@ -166,6 +157,5 @@ void loop() {
             break;
     }
     
-    // O microcontrolador respira livremente a cada ciclo
     delay(10); 
 }

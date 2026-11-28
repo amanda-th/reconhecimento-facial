@@ -4,6 +4,8 @@ import sys
 import numpy as np
 import glob
 import re
+import csv
+from datetime import datetime
 import tkinter as tk
 from tkinter import simpledialog
 
@@ -22,8 +24,11 @@ TAMANHO_VETOR = GRID_X * GRID_Y * BINS # Agora é 1475 em vez de 6400
 pasta_processadas = 'imagens_processadas'
 caminho_esp32 = os.path.join('esp-main', 'banco_rostos.h') 
 
+pasta_brutas = 'rostos_brutos'   # recorte cinza SEM filtro, com margem (para testar alinhamento etc. sem refotografar)
+
 if not os.path.exists(pasta_processadas):
     os.makedirs(pasta_processadas)
+os.makedirs(pasta_brutas, exist_ok=True)
 
 # Tabela de tradução de 256 padrões para 59 padrões uniformes
 def _tabela_uniforme():
@@ -134,6 +139,7 @@ print(f"\n[1/3] CAPTURANDO FOTOS PARA: {nome_usuario}")
 print("Pressione 'c' para tirar a foto (faça umas 5 ou 6). Pressione 'q' quando terminar.")
 
 contador = 1
+carimbo = datetime.now().strftime("%Y%m%d%H%M%S")   # nomes unicos: nao sobrescreve cadastros antigos
 while True:
     ret, frame = cap.read()
     if not ret: break
@@ -141,9 +147,15 @@ while True:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
     imagem_processada = None
+    recorte_bruto = None
 
     if len(faces) > 0:
         (x, y, w, h) = faces[0]
+        pad = int(0.25 * w)
+        py0, py1 = max(0, y - pad), min(gray.shape[0], y + h + pad)
+        px0, px1 = max(0, x - pad), min(gray.shape[1], x + w + pad)
+        recorte_bruto = gray[py0:py1, px0:px1].copy()
+        caixa_rel = (x - px0, y - py0, w, h)   # onde esta a caixa do Haar dentro do recorte com margem
         rosto_cortado = gray[y:y+h, x:x+w]
         resized = cv2.resize(rosto_cortado, (WIDTH, HEIGHT))
         imagem_processada = aplicar_tan_triggs(resized)
@@ -155,8 +167,11 @@ while True:
     key = cv2.waitKey(1) & 0xFF
     
     if key == ord('c') and imagem_processada is not None:
-        nome_arquivo = os.path.join(pasta_processadas, f"{nome_usuario}_{contador}.jpg")
-        cv2.imwrite(nome_arquivo, imagem_processada)
+        arq = f"{nome_usuario}_{carimbo}_{contador}.png"          # PNG: sem perda
+        cv2.imwrite(os.path.join(pasta_processadas, arq), imagem_processada)
+        cv2.imwrite(os.path.join(pasta_brutas, arq), recorte_bruto)
+        with open(os.path.join(pasta_brutas, 'caixas.csv'), 'a', newline='') as fcsv:
+            csv.writer(fcsv).writerow([arq, *caixa_rel])
         print(f" -> Foto {contador} salva com sucesso!")
         contador += 1
     elif key == ord('q'):

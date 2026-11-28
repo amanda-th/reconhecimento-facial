@@ -44,7 +44,7 @@ print(f"Iniciando varredura na pasta '{pasta_origem}'...\n")
 # PROCESSAMENTO EM LOTE (BATCH PROCESSING)
 # =========================================================================
 for nome_arquivo in os.listdir(pasta_origem):
-    # Filtra apenas arquivos de imagem
+    # Filtra arquivos de imagem, independente da extensão original
     if not nome_arquivo.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
         continue
         
@@ -62,31 +62,35 @@ for nome_arquivo in os.listdir(pasta_origem):
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30))
 
     if len(faces) > 0:
-        # Pega o primeiro rosto encontrado
-        (x, y, w, h) = faces[0]
+        # Pega o primeiro rosto encontrado (o maior normalmente)
+        # Uma boa prática é ordenar pelo tamanho, mas pegaremos o primeiro por padrão
+        (x, y, w, h) = faces[0] 
         
         # 1. Recorta o rosto
         rosto_cortado = gray[y:y+h, x:x+w]
         
-        # 2. Padroniza o tamanho para 64x64
-        resized = cv2.resize(rosto_cortado, (WIDTH, HEIGHT))
+        # 2. Padroniza o tamanho para 64x64 usando a interpolação mais adequada (INTER_AREA)
+        resized = cv2.resize(rosto_cortado, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
         
         # 3. Aplica o filtro de iluminação
         rosto_final = aplicar_tan_triggs(resized)
         
+        # 4. Define o novo nome forçando a extensão .png
+        nome_sem_extensao = os.path.splitext(nome_arquivo)[0]
+        novo_nome_arquivo = f"{nome_sem_extensao}.png"
+        caminho_salvar = os.path.join(pasta_destino, novo_nome_arquivo)
+        
         # Salva na nova pasta
-        caminho_salvar = os.path.join(pasta_destino, nome_arquivo)
         cv2.imwrite(caminho_salvar, rosto_final)
         
-        print(f"[OK] Processado: {nome_arquivo}")
+        print(f"[OK] Processado: {nome_arquivo} -> {novo_nome_arquivo}")
         rostos_processados += 1
     else:
-        # Se a foto do colega for muito ruim ou distante e o cascade falhar
         print(f"[FALHA] Nenhum rosto detectado em: {nome_arquivo}")
         rostos_nao_encontrados.append(nome_arquivo)
 
 print("\n=======================================================")
-print(f"Processamento concluído! {rostos_processados} rostos convertidos com sucesso.")
+print(f"Processamento concluído! {rostos_processados} rostos convertidos e salvos como PNG.")
 if rostos_nao_encontrados:
     print(f"Atenção: O algoritmo não encontrou rostos nestas fotos: {rostos_nao_encontrados}")
-print(f"As imagens prontas para a ESP32 estão na pasta '{pasta_destino}'.")
+print(f"As imagens (.png) prontas para a ESP32 estão na pasta '{pasta_destino}'.")
